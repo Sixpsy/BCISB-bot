@@ -1,0 +1,6 @@
+[
+  { "key": "register", "label": "ลงทะเบียน",        "bg": "#E6F1FB", "text": "#0C447C", "ansi": "34" },
+  { "key": "holiday",  "label": "วันหยุด",           "bg": "#EAF3DE", "text": "#27500A", "ansi": "32" },
+  { "key": "activity", "label": "กิจกรรมลูก",        "bg": "#FAEEDA", "text": "#633806", "ansi": "33" },
+  { "key": "parent",   "label": "กิจกรรมผู้ปกครอง", "bg": "#EEEDFE", "text": "#3C3489", "ansi": "35" }
+]

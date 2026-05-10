@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Mutable data files — mounted from the NAS folder so they survive rebuilds
+      - ./events.json:/app/events.json
+      - ./reminders.json:/app/reminders.json
+      - ./resources.json:/app/resources.json
+      - ./dresscode.json:/app/dresscode.json
+      - ./calendar_state.json:/app/calendar_state.json
+      - ./recurring.json:/app/recurring.json

@@ -1,0 +1,331 @@
+[
+  {
+    "date": "2026-04-06",
+    "name": "วันจักรี",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-10",
+    "name": "สงกรานต์",
+    "cat": "parent",
+    "detail": "กิจกรรมเริ่ม 08:00 จนถึง 11:30 สามารถรับลูกกลับได้เลย หรือรับอีกทีตอน 13:45 ให้เตรียมชุดมาเปลี่ยนให้ลูกด้วย"
+  },
+  {
+    "date": "2026-04-13",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-14",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-15",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-16",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-17",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-04-27",
+    "name": "เริ่มเรียน ECA Term 3",
+    "cat": "activity"
+  },
+  {
+    "date": "2026-05-01",
+    "name": "วันแรงงานแห่งชาติ",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-05-04",
+    "name": "ชดเชยวันฉัตรมงคล",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-05-15",
+    "name": "ISAA Swimming Gala - BCISB (ไม่มีเรียน)",
+    "cat": "holiday",
+    "detail": "No School — BCISB hosts ISAA Swimming Gala"
+  },
+  {
+    "date": "2026-05-19",
+    "name": "K1 : TK Park",
+    "cat": "activity",
+    "detail": "K1 field trip to TK Park"
+  },
+
+  {
+    "date": "2026-08-12",
+    "name": "วันแม่แห่งชาติ",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-08-24",
+    "name": "วันเปิดเรียน Kindergarten",
+    "cat": "activity",
+    "detail": "วันแรกของ KG ปีการศึกษา 2026-2027"
+  },
+  {
+    "date": "2026-08-25",
+    "name": "วันเปิดเรียน ES/MS/HS",
+    "cat": "activity"
+  },
+  {
+    "date": "2026-09-21",
+    "name": "ถ่ายรูปประจำปี Rembrandt",
+    "cat": "activity",
+    "detail": "ถ่ายรูปนักเรียน 21-25 ก.ย."
+  },
+  {
+    "date": "2026-10-08",
+    "name": "ตรวจสุขภาพประจำปี",
+    "cat": "activity",
+    "detail": "8-9 ต.ค."
+  },
+  {
+    "date": "2026-10-13",
+    "name": "วันคล้ายวันสวรรคต ร.9",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-10-19",
+    "name": "ปิดเทอมกลาง Fall Break",
+    "cat": "holiday",
+    "detail": "19-23 ต.ค."
+  },
+  {
+    "date": "2026-10-20",
+    "name": "Fall Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-10-21",
+    "name": "Fall Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-10-22",
+    "name": "Fall Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-10-23",
+    "name": "Fall Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-10-30",
+    "name": "Halloween",
+    "cat": "activity"
+  },
+  {
+    "date": "2026-11-24",
+    "name": "วันลอยกระทง",
+    "cat": "activity"
+  },
+  {
+    "date": "2026-11-27",
+    "name": "สิ้นสุด Term 1",
+    "cat": "activity",
+    "detail": "แจก Report Card Term 1 (ELEM/MS)"
+  },
+  {
+    "date": "2026-12-07",
+    "name": "ชดเชยวันพ่อแห่งชาติ",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-08",
+    "name": "Sport Days & Charity Run",
+    "cat": "parent",
+    "detail": "8-9 ธ.ค."
+  },
+  {
+    "date": "2026-12-17",
+    "name": "Christmas Party",
+    "cat": "parent"
+  },
+  {
+    "date": "2026-12-21",
+    "name": "ปิดเทอม Winter Break",
+    "cat": "holiday",
+    "detail": "21 ธ.ค. - 8 ม.ค."
+  },
+  {
+    "date": "2026-12-22",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-23",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-24",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-25",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-26",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-29",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-30",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2026-12-31",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-01",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-04",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-05",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-06",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-07",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-08",
+    "name": "Winter Break",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-01-11",
+    "name": "เปิดเรียน Back to School",
+    "cat": "activity"
+  },
+  {
+    "date": "2027-01-21",
+    "name": "วันไหว้ครู",
+    "cat": "parent"
+  },
+  {
+    "date": "2027-02-05",
+    "name": "กิจกรรมตรุษจีน",
+    "cat": "activity"
+  },
+  {
+    "date": "2027-02-12",
+    "name": "วันวาเลนไทน์",
+    "cat": "activity"
+  },
+  {
+    "date": "2027-02-22",
+    "name": "วันมาฆบูชา",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-03-19",
+    "name": "สิ้นสุด Term 2",
+    "cat": "activity",
+    "detail": "แจก Report Card Term 2 (ELEM/MS)"
+  },
+  {
+    "date": "2027-04-05",
+    "name": "Teacher In-Service Day",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-04-06",
+    "name": "วันจักรี",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-04-09",
+    "name": "กิจกรรมสงกรานต์",
+    "cat": "parent"
+  },
+  {
+    "date": "2027-04-12",
+    "name": "ปิดเทอมสงกรานต์",
+    "cat": "holiday",
+    "detail": "12-16 เม.ย."
+  },
+  {
+    "date": "2027-04-13",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-04-14",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-04-15",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-04-16",
+    "name": "วันหยุดสงกรานต์",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-05-03",
+    "name": "ชดเชยวันแรงงาน",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-05-04",
+    "name": "วันฉัตรมงคล",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-05-20",
+    "name": "วันวิสาขบูชา",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-06-03",
+    "name": "วันเฉลิมพระชนมพรรษา สมเด็จพระราชินี",
+    "cat": "holiday"
+  },
+  {
+    "date": "2027-06-30",
+    "name": "วันสุดท้ายของปีการศึกษา",
+    "cat": "activity",
+    "detail": "สิ้นสุด Term 3 / แจก Report Card Term 3 (ELEM/MS)"
+  }
+]
