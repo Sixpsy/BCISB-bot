@@ -237,9 +237,15 @@ def get_dress_for_date(d: date) -> dict | None:
     return dc.get("schedule", {}).get(wd)
 
 def get_events_for_date(d: date) -> list:
-    """Return one-off (non-recurring) events from events.json for a specific date."""
+    """Return one-off and recurring events for a specific date."""
     date_str = d.strftime("%Y-%m-%d")
-    return [e for e in load_events(EVENTS_FILE) if e.get("date") == date_str]
+    one_off = [e for e in load_events(EVENTS_FILE) if e.get("date") == date_str]
+    recurring_on_day = []
+    for rec in load_recurring():
+        for ev in expand_recurring_for_month(rec, d.year, d.month):
+            if ev["date"] == date_str:
+                recurring_on_day.append(ev)
+    return one_off + recurring_on_day
 
 def is_holiday_or_weekend(d: date) -> tuple[bool, str]:
     """
@@ -265,14 +271,15 @@ def is_holiday_or_weekend(d: date) -> tuple[bool, str]:
         return True, "วันอาทิตย์"
     return False, ""
 
-def next_school_day(d: date) -> date:
+def next_school_day(d: date, max_lookahead: int = 60) -> date:
     """Return the next school day after d (skips weekends AND holidays)."""
     nxt = d + timedelta(days=1)
-    while True:
+    for _ in range(max_lookahead):
         is_hol, _ = is_holiday_or_weekend(nxt)
         if not is_hol:
             return nxt
         nxt += timedelta(days=1)
+    return nxt
 
 def fmt_thai_date(d: date) -> str:
     wd = TH_WEEKDAYS[d.weekday()]
@@ -652,7 +659,7 @@ def format_event_list(events_by_month: list, cat_ansi: dict = None) -> str:
     cat_ansi        : if provided, output is a Discord ```ansi``` code block with
                       per-category colors and spacious layout; otherwise plain markdown.
     """
-    today      = date.today()
+    today      = datetime.now(BANGKOK_TZ).date()
     use_ansi   = cat_ansi is not None
     cat_labels = load_cat_labels() if use_ansi else {}
     lines: list[str] = []
@@ -893,6 +900,12 @@ async def delete_daily_reminder():
     if not info:
         return
 
+    today_str = datetime.now(BANGKOK_TZ).date().strftime("%Y-%m-%d")
+    if info.get("date") != today_str:
+        state.pop("daily_reminder_msg", None)
+        save_state(state)
+        return
+
     channel = client.get_channel(info["channel_id"])
     if not channel:
         return
@@ -980,6 +993,9 @@ async def monthly_calendar():
     if now.day != 1:
         return
     await post_two_month_calendar(now.year, now.month)
+    state = load_state()
+    state["last_calendar_month"] = f"{now.year}-{now.month}"
+    save_state(state)
 
 
 # =============================================
@@ -1011,7 +1027,7 @@ async def post_two_month_calendar(year: int = None, month: int = None):
             print(f"[calendar] Cannot find channel {CHANNEL_ID}: {e}")
             raise RuntimeError(f"ไม่พบช่อง calendar (ID: {CHANNEL_ID})") from e
 
-    today = date.today()
+    today = datetime.now(BANGKOK_TZ).date()
     year  = year  or today.year
     month = month or today.month
     y2, m2 = next_month(year, month)
@@ -1029,12 +1045,16 @@ async def post_two_month_calendar(year: int = None, month: int = None):
 
     # Color the embed stripe using the next upcoming event's category color.
     all_sorted = sorted(evts_m1 + evts_m2, key=lambda e: e["date"])
-    today_str  = date.today().strftime("%Y-%m-%d")
+    today_str  = datetime.now(BANGKOK_TZ).date().strftime("%Y-%m-%d")
     next_ev    = next((e for e in all_sorted if e["date"] >= today_str), None)
     embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
 
+    if y2 != year:
+        cal_title = f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} {year + 543} - {TH_MONTHS[m2]} {y2 + 543}"
+    else:
+        cal_title = f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}"
     embed = discord.Embed(
-        title=f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}",
+        title=cal_title,
         description=description,
         color=embed_color,
     )
@@ -1461,7 +1481,7 @@ async def event_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     """Return future events as autocomplete choices (date|name), sorted ascending by date."""
     events = sorted(load_events(EVENTS_FILE), key=lambda e: e["date"])
-    today = date.today()
+    today = datetime.now(BANGKOK_TZ).date()
     choices = []
     for e in events:
         ev_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
@@ -2046,6 +2066,21 @@ async def on_ready():
     delete_daily_reminder.start()
     check_dm_reminders.start()
     daily_dress_reminder.start()
+
+    # Catch-up: post monthly calendar if the bot was offline on the 1st
+    now_bkk = datetime.now(BANGKOK_TZ).date()
+    state = load_state()
+    last_posted = state.get("last_calendar_month")
+    current_key = f"{now_bkk.year}-{now_bkk.month}"
+    if last_posted != current_key:
+        try:
+            await post_two_month_calendar(now_bkk.year, now_bkk.month)
+            state = load_state()
+            state["last_calendar_month"] = current_key
+            save_state(state)
+            print(f"[on_ready] Catch-up calendar posted for {current_key}")
+        except Exception as e:
+            print(f"[on_ready] Catch-up calendar failed: {e}")
 
 
 # ---- Run ----
