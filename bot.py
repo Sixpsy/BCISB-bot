@@ -3,6 +3,7 @@ import io
 import re
 import uuid
 import json
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -35,6 +36,7 @@ REMINDERS_FILE      = BASE_DIR / "reminders.json"
 RESOURCES_FILE      = BASE_DIR / "resources.json"
 
 BANGKOK_TZ = timezone(timedelta(hours=7))
+_dress_post_lock = asyncio.Lock()
 
 TH_WEEKDAYS = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
 
@@ -316,6 +318,11 @@ def get_upcoming_special_days(after: date) -> list[tuple[date, dict]]:
 
 async def post_dress_code(target_date: date = None):
     """Purge the dress channel, then post a fresh dress-code embed."""
+    async with _dress_post_lock:
+        await _post_dress_code_inner(target_date)
+
+
+async def _post_dress_code_inner(target_date: date = None):
     if not DRESS_CHANNEL_ID:
         print("[dress] DRESS_CHANNEL_ID not set in .env — skipping")
         return
@@ -2061,11 +2068,10 @@ async def on_ready():
         synced = await tree.sync()
         print(f"Synced {len(synced)} command(s) globally")
 
-    monthly_calendar.start()
-    daily_channel_reminder.start()
-    delete_daily_reminder.start()
-    check_dm_reminders.start()
-    daily_dress_reminder.start()
+    for loop in (monthly_calendar, daily_channel_reminder, delete_daily_reminder,
+                 check_dm_reminders, daily_dress_reminder):
+        if not loop.is_running():
+            loop.start()
 
     # Catch-up: post monthly calendar if the bot was offline on the 1st
     now_bkk = datetime.now(BANGKOK_TZ).date()
