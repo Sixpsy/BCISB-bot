@@ -92,6 +92,17 @@ Everything lives in two Python files:
 
 When files are uploaded to the resources channel, the bot extracts text from PDFs (PyMuPDF) or images, detects date patterns in the text, and surfaces clickable buttons so admins can add detected dates directly to the calendar.
 
+## Test channel
+
+A private channel (ID `1503578584961515691`, not visible to parents) exists for testing bot output without affecting live channels. Two admin-only commands post to it:
+
+| Command | What it tests |
+|---|---|
+| `/test-dress` | Dress code embed (grey colour, `[TEST]` footer) |
+| `/test-calendar` | 2-month calendar image + event list (grey colour, `[TEST]` title) |
+
+Neither command touches or purges the real channels.
+
 ## Known bugs fixed
 
 - **`on_ready` fires on every Discord reconnect**, not just startup. All task loops are guarded with `if not loop.is_running(): loop.start()` to prevent duplicate loop instances from launching on reconnect.
