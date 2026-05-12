@@ -1939,6 +1939,68 @@ async def test_dress(interaction: discord.Interaction):
 
 
 # =============================================
+#  Slash command: /test-calendar  (post to test channel)
+# =============================================
+@tree.command(
+    name="test-calendar",
+    description="ทดสอบโพสต์ปฏิทินในช่องทดสอบ (Admin เท่านั้น)",
+)
+@app_commands.describe(
+    month="เดือนเริ่มต้น (1-12) ถ้าไม่ระบุ = เดือนปัจจุบัน",
+    year="ปี ค.ศ. ถ้าไม่ระบุ = ปีปัจจุบัน",
+)
+async def test_calendar(
+    interaction: discord.Interaction,
+    month: int = None,
+    year: int = None,
+):
+    if not any(r.name == "Admin" for r in interaction.user.roles):
+        await interaction.response.send_message(
+            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        test_channel = client.get_channel(1503578584961515691)
+        if not test_channel:
+            test_channel = await client.fetch_channel(1503578584961515691)
+
+        today = datetime.now(BANGKOK_TZ).date()
+        month = month or today.month
+        year  = year  or today.year
+        y2, m2 = next_month(year, month)
+
+        events   = get_combined_events_range(year, month, y2, m2)
+        img_path = await generate_two_month_image(year, month, events,
+                                                  output=str(BASE_DIR / "calendar_2m.png"))
+        evts_m1 = get_month_events(events, year, month)
+        evts_m2 = get_month_events(events, y2, m2)
+        description = format_event_list(
+            [(year, month, evts_m1), (y2, m2, evts_m2)],
+            cat_ansi=load_cat_ansi(),
+        )
+        all_sorted = sorted(evts_m1 + evts_m2, key=lambda e: e["date"])
+        today_str  = today.strftime("%Y-%m-%d")
+        next_ev    = next((e for e in all_sorted if e["date"] >= today_str), None)
+        embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
+
+        if y2 != year:
+            cal_title = f"[TEST] ปฏิทินกิจกรรม — {TH_MONTHS[month]} {year + 543} - {TH_MONTHS[m2]} {y2 + 543}"
+        else:
+            cal_title = f"[TEST] ปฏิทินกิจกรรม — {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}"
+
+        embed = discord.Embed(title=cal_title, description=description, color=0x95A5A6)
+        embed.set_image(url="attachment://calendar_2m.png")
+        embed.set_footer(text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+
+        file = discord.File(img_path, filename="calendar_2m.png")
+        await test_channel.send(file=file, embed=embed)
+        await interaction.followup.send("✅ ส่งปฏิทินไปช่องทดสอบแล้วครับ", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+
+
+# =============================================
 #  on_message — auto-process file uploads in resources channel
 # =============================================
 @client.event
