@@ -316,10 +316,18 @@ def get_upcoming_special_days(after: date) -> list[tuple[date, dict]]:
     return result
 
 
+_dress_last_posted: date | None = None
+
 async def post_dress_code(target_date: date = None):
     """Purge the dress channel, then post a fresh dress-code embed."""
+    global _dress_last_posted
     async with _dress_post_lock:
+        today = target_date or datetime.now(BANGKOK_TZ).date()
+        if _dress_last_posted == today:
+            print(f"[dress] Already posted for {today}, skipping duplicate trigger")
+            return
         await _post_dress_code_inner(target_date)
+        _dress_last_posted = today
 
 
 async def _post_dress_code_inner(target_date: date = None):
