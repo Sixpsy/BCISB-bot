@@ -1884,6 +1884,61 @@ async def post_dress(interaction: discord.Interaction):
 
 
 # =============================================
+#  Slash command: /test-dress  (post to test channel)
+# =============================================
+@tree.command(
+    name="test-dress",
+    description="ทดสอบโพสต์แจ้งเครื่องแต่งกายในช่องทดสอบ (Admin เท่านั้น)",
+)
+async def test_dress(interaction: discord.Interaction):
+    if not any(r.name == "Admin" for r in interaction.user.roles):
+        await interaction.response.send_message(
+            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        test_channel = client.get_channel(1503578584961515691)
+        if not test_channel:
+            test_channel = await client.fetch_channel(1503578584961515691)
+
+        today = datetime.now(BANGKOK_TZ).date()
+        tomorrow = next_school_day(today)
+        today_info = get_dress_for_date(today)
+        tomorrow_info = get_dress_for_date(tomorrow)
+        specials = get_upcoming_special_days(after=today)
+
+        SEP = "\n​\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n​\n"
+        desc = (
+            _dress_section(today, today_info, "🌅") +
+            SEP +
+            _dress_section(tomorrow, tomorrow_info, "🌄")
+        )
+        if specials:
+            lines = ["### 📌  วันแต่งกายพิเศษที่กำลังจะมาถึง\n"]
+            for d, info in specials:
+                wd = TH_WEEKDAYS[d.weekday()]
+                date_lbl = f"**{d.day} {TH_MONTHS[d.month]} {d.year + 543}**  ({wd})"
+                dress = info.get("dress", "—")
+                note = f"  _— {info['note']}_" if info.get("note") else ""
+                lines.append(f"◆  {date_lbl}  —  {dress}{note}")
+            desc += SEP + "\n".join(lines)
+
+        embed = discord.Embed(
+            title="👗  แจ้งเครื่องแต่งกาย [ทดสอบ]",
+            description=desc,
+            color=0x95A5A6,
+        )
+        embed.set_footer(
+            text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น."
+        )
+        await test_channel.send(embed=embed)
+        await interaction.followup.send("✅ ส่งไปช่องทดสอบแล้วครับ", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+
+
+# =============================================
 #  on_message — auto-process file uploads in resources channel
 # =============================================
 @client.event
