@@ -71,6 +71,9 @@ body { background:#fff; }
 .evts { display:flex; flex-direction:column; gap:2px; }
 .evt { font-size:10px; padding:2px 4px; border-radius:3px; white-space:nowrap;
        overflow:hidden; text-overflow:ellipsis; font-weight:500; }
+.evt-s { border-radius:3px 0 0 3px; margin-right:-6px; padding-right:2px; }
+.evt-m { border-radius:0; margin:0 -6px; padding-left:0; padding-right:0; }
+.evt-e { border-radius:0 3px 3px 0; margin-left:-6px; padding-left:2px; }
 .more { font-size:10px; color:#aaa; padding:1px 3px; }
 .legend { display:flex; gap:14px; flex-wrap:wrap; }
 .leg { display:flex; align-items:center; gap:5px; font-size:12px; color:#555; }
@@ -94,24 +97,59 @@ def _month_cells(events, year, month):
     cal = calendar.Calendar(firstweekday=6).monthdayscalendar(year, month)
     today = date.today()
 
-    # Weekday headers are part of the same grid
     cells = WEEKDAY_CELLS
 
     for week in cal:
-        for day in week:
+        for col, day in enumerate(week):
             if day == 0:
                 cells += '<div class="cell empty"></div>'
                 continue
+
             is_today = (date(year, month, day) == today)
             day_evts = event_map.get(day, [])
             evts_html = ""
+
             for ev in day_evts[:2]:
                 c = CAT_COLORS.get(ev["cat"], _CAT_FALLBACK)
-                evts_html += f'<div class="evt" style="background:{c["bg"]};color:{c["text"]}">{ev["name"]}</div>'
+                bg, fg = c["bg"], c["text"]
+                style = f'style="background:{bg};color:{fg}"'
+
+                ev_start = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+                ev_end   = datetime.strptime(ev.get("end_date", ev["date"]), "%Y-%m-%d").date()
+
+                if ev_start == ev_end:
+                    evts_html += f'<div class="evt" {style}>{ev["name"]}</div>'
+                    continue
+
+                # Multi-day event — determine band position within this week row
+                prev_day = week[col - 1] if col > 0 else 0
+                next_day = week[col + 1] if col < 6 else 0
+
+                def in_range(d):
+                    return d > 0 and ev_start <= date(year, month, d) <= ev_end
+
+                visual_start = not in_range(prev_day)
+                visual_end   = not in_range(next_day)
+
+                if visual_start and visual_end:
+                    evts_html += f'<div class="evt" {style}>{ev["name"]}</div>'
+                elif visual_start:
+                    evts_html += f'<div class="evt evt-s" {style}>{ev["name"]}</div>'
+                elif visual_end:
+                    evts_html += f'<div class="evt evt-e" {style}>&nbsp;</div>'
+                else:
+                    evts_html += f'<div class="evt evt-m" {style}>&nbsp;</div>'
+
             if len(day_evts) > 2:
                 evts_html += f'<div class="more">+{len(day_evts)-2}</div>'
+
             today_cls = " today" if is_today else ""
-            cells += f'<div class="cell{today_cls}"><div class="day-num">{day}</div><div class="evts">{evts_html}</div></div>'
+            cells += (
+                f'<div class="cell{today_cls}">'
+                f'<div class="day-num">{day}</div>'
+                f'<div class="evts">{evts_html}</div>'
+                f'</div>'
+            )
     return cells
 
 

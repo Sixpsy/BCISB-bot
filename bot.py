@@ -882,7 +882,16 @@ async def daily_channel_reminder():
         cat_lbl = cat_labels.get(cat_key, cat_key)
         detail  = ev.get("detail", "")
         desc_lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))
-        desc_lines.append(_ansi(f"     {cat_lbl}  ·  {today_bkk.day} {th_month}", code, dim=True))
+        if ev.get("end_date") and ev["end_date"] != ev["date"]:
+            ev_s = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+            ev_e = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
+            if ev_s.month == ev_e.month:
+                date_label = f"{ev_s.day}–{ev_e.day} {TH_MONTHS[ev_s.month]}"
+            else:
+                date_label = f"{ev_s.day} {TH_MONTHS[ev_s.month]} – {ev_e.day} {TH_MONTHS[ev_e.month]}"
+        else:
+            date_label = f"{today_bkk.day} {th_month}"
+        desc_lines.append(_ansi(f"     {cat_lbl}  ·  {date_label}", code, dim=True))
         if detail:
             desc_lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
         desc_lines.append("")   # blank line = breathing room between events
