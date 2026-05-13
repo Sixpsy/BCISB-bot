@@ -715,7 +715,14 @@ def format_event_list(events_by_month: list, cat_ansi: dict = None) -> str:
 
             if use_ansi:
                 cat_lbl = cat_labels.get(cat_key, cat_key)
-                th_day  = f"{ev_date.day} {TH_MONTHS[ev_date.month]}"
+                if ev.get("end_date") and ev["end_date"] != ev["date"]:
+                    ev_end_d = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
+                    if ev_date.month == ev_end_d.month:
+                        th_day = f"{ev_date.day}–{ev_end_d.day} {TH_MONTHS[ev_date.month]}"
+                    else:
+                        th_day = f"{ev_date.day} {TH_MONTHS[ev_date.month]} – {ev_end_d.day} {TH_MONTHS[ev_end_d.month]}"
+                else:
+                    th_day = f"{ev_date.day} {TH_MONTHS[ev_date.month]}"
                 lines.append("")                                                  # breathing room
                 lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))      # bold event name
                 lines.append(_ansi(f"     {cat_lbl}  ·  {th_day}", code, dim=True))  # dim meta
@@ -854,7 +861,11 @@ async def daily_channel_reminder():
         return
 
     events = load_events(EVENTS_FILE)
-    today_events = [e for e in events if e["date"] == today_str]
+    today_events = [
+        e for e in events
+        if e["date"] == today_str
+        or (e.get("end_date") and e["date"] <= today_str <= e["end_date"])
+    ]
     for rec in load_recurring():
         for ev in expand_recurring_for_month(rec, today_bkk.year, today_bkk.month):
             if ev["date"] == today_str:
@@ -2027,6 +2038,103 @@ async def test_calendar(
 
 
 # =============================================
+#  Slash command: /agenda  (next 14 days)
+# =============================================
+@tree.command(
+    name="agenda",
+    description="แสดงกิจกรรมใน 14 วันข้างหน้าแบบละเอียด",
+)
+async def agenda(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    today    = datetime.now(BANGKOK_TZ).date()
+    end_date = today + timedelta(days=13)
+
+    # ── Collect one-off events, multi-day events appear on their first visible day ──
+    day_map: dict = {}
+    for e in load_events(EVENTS_FILE):
+        ev_start = datetime.strptime(e["date"], "%Y-%m-%d").date()
+        ev_end   = datetime.strptime(e.get("end_date", e["date"]), "%Y-%m-%d").date()
+        if ev_end < today or ev_start > end_date:
+            continue
+        first_day = max(ev_start, today)
+        day_map.setdefault(first_day, []).append(e)
+
+    # ── Recurring events ──
+    months = set()
+    d = today
+    while d <= end_date:
+        months.add((d.year, d.month))
+        d += timedelta(days=1)
+    for rec in load_recurring():
+        for y, m in months:
+            for ev in expand_recurring_for_month(rec, y, m):
+                ev_date = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+                if today <= ev_date <= end_date:
+                    day_map.setdefault(ev_date, []).append(ev)
+
+    cat_labels = load_cat_labels()
+    cat_ansi   = load_cat_ansi()
+
+    if not day_map:
+        await interaction.followup.send(
+            f"ไม่มีกิจกรรมในช่วง {today.day} {TH_MONTHS[today.month]} – "
+            f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
+        )
+        return
+
+    lines: list[str] = []
+    for d in sorted(day_map.keys()):
+        wd          = TH_WEEKDAYS[d.weekday()]
+        date_header = f"วัน{wd}ที่ {d.day} {TH_MONTHS[d.month]} {d.year + 543}"
+        if d == today:
+            date_header += "  ◀ วันนี้"
+        lines.append(_ansi(date_header, "37", bold=True))
+        lines.append("─" * 34)
+
+        for ev in day_map[d]:
+            cat_key = ev.get("cat", "")
+            code    = cat_ansi.get(cat_key, "37")
+            cat_lbl = cat_labels.get(cat_key, cat_key)
+            detail  = ev.get("detail", "")
+
+            if ev.get("end_date") and ev["end_date"] != ev["date"]:
+                ev_s = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+                ev_e = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
+                if ev_s.month == ev_e.month:
+                    date_lbl = f"{ev_s.day}–{ev_e.day} {TH_MONTHS[ev_s.month]}"
+                else:
+                    date_lbl = f"{ev_s.day} {TH_MONTHS[ev_s.month]} – {ev_e.day} {TH_MONTHS[ev_e.month]}"
+            else:
+                date_lbl = f"{d.day} {TH_MONTHS[d.month]}"
+
+            lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))
+            lines.append(_ansi(f"     {cat_lbl}  ·  {date_lbl}", code, dim=True))
+            if detail:
+                lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
+
+        lines.append("")
+
+    description = "```ansi\n" + "\n".join(lines) + "```"
+
+    # Truncate if Discord's 4096-char embed limit is approached
+    if len(description) > 4000:
+        description = description[:3990] + "\n…```"
+
+    embed = discord.Embed(
+        title=(
+            f"📋  กิจกรรม 14 วันข้างหน้า  —  "
+            f"{today.day} {TH_MONTHS[today.month]} – "
+            f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
+        ),
+        description=description,
+        color=0x534AB7,
+    )
+    embed.set_footer(text=f"อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+    await interaction.followup.send(embed=embed)
+
+
+# =============================================
 #  on_message — auto-process file uploads in resources channel
 # =============================================
 @client.event
@@ -2119,6 +2227,11 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="📅  /calendar",
         value="ดูปฏิทินกิจกรรม 2 เดือน (เดือนนี้ + เดือนหน้า)",
+        inline=False,
+    )
+    embed.add_field(
+        name="📋  /agenda",
+        value="ดูกิจกรรม 14 วันข้างหน้าแบบละเอียด พร้อมรายละเอียดและหมวดหมู่",
         inline=False,
     )
     embed.add_field(
