@@ -1169,10 +1169,11 @@ async def show_calendar(
     description="เพิ่มกิจกรรมลงปฏิทิน (Admin เท่านั้น)",
 )
 @app_commands.describe(
-    date_str="วันที่ รูปแบบ YYYY-MM-DD เช่น 2026-05-20",
+    date_str="วันที่เริ่ม รูปแบบ YYYY-MM-DD เช่น 2026-05-20",
+    end_date_str="วันที่สิ้นสุด (ถ้าเป็นกิจกรรมหลายวัน) รูปแบบ YYYY-MM-DD (ไม่บังคับ)",
     cat="หมวดหมู่ (เลือกจากรายการ)",
     name="ชื่อกิจกรรม",
-    detail="รายละเอียดเพิ่มเติม เช่น เริ่ม 10.00 น. หรือ เตรียมชุดสำรอง (ไม่บังคับ)",
+    detail="รายละเอียดเพิ่มเติม (ไม่บังคับ)",
 )
 @app_commands.autocomplete(cat=category_autocomplete)
 async def add_event(
@@ -1180,6 +1181,7 @@ async def add_event(
     date_str: str,
     cat: str,
     name: str,
+    end_date_str: str = None,
     detail: str = None,
 ):
     if not any(r.name == "Admin" for r in interaction.user.roles):
@@ -1188,11 +1190,23 @@ async def add_event(
         return
 
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        start_date = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         await interaction.response.send_message(
-            "รูปแบบวันที่ไม่ถูกต้อง ใช้ YYYY-MM-DD เช่น 2026-05-20", ephemeral=True)
+            "รูปแบบวันที่เริ่มไม่ถูกต้อง ใช้ YYYY-MM-DD เช่น 2026-05-20", ephemeral=True)
         return
+
+    if end_date_str:
+        try:
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+        except ValueError:
+            await interaction.response.send_message(
+                "รูปแบบวันที่สิ้นสุดไม่ถูกต้อง ใช้ YYYY-MM-DD เช่น 2026-05-22", ephemeral=True)
+            return
+        if end_date < start_date:
+            await interaction.response.send_message(
+                "วันที่สิ้นสุดต้องไม่อยู่ก่อนวันที่เริ่ม", ephemeral=True)
+            return
 
     cat = cat.strip().lower()
     if cat not in load_categories():
@@ -1205,17 +1219,20 @@ async def add_event(
 
     events = load_events(EVENTS_FILE)
     event = {"date": date_str, "name": name, "cat": cat}
+    if end_date_str:
+        event["end_date"] = end_date_str
     if detail and detail.strip():
         event["detail"] = detail.strip()
     events.append(event)
     with open(EVENTS_FILE, "w", encoding="utf-8") as f:
         json.dump(events, f, ensure_ascii=False, indent=2)
 
+    date_label = f"{date_str} ถึง {end_date_str}" if end_date_str else date_str
     detail_note = f"\n   _{detail.strip()}_" if detail and detail.strip() else ""
     try:
         await post_two_month_calendar()
         await interaction.followup.send(
-            f"\u2705 เพิ่มกิจกรรม **{name}** วันที่ {date_str} แล้วครับ{detail_note}",
+            f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}",
             ephemeral=True,
         )
     except Exception as e:

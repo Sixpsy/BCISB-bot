@@ -35,11 +35,16 @@ def load_events(path="events.json"):
 
 
 def build_event_map(events, year, month):
+    from datetime import timedelta
     result = {}
     for e in events:
-        d = datetime.strptime(e["date"], "%Y-%m-%d").date()
-        if d.year == year and d.month == month:
-            result.setdefault(d.day, []).append(e)
+        start = datetime.strptime(e["date"], "%Y-%m-%d").date()
+        end = datetime.strptime(e["end_date"], "%Y-%m-%d").date() if e.get("end_date") else start
+        d = start
+        while d <= end:
+            if d.year == year and d.month == month:
+                result.setdefault(d.day, []).append(e)
+            d += timedelta(days=1)
     return result
 
 
