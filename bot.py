@@ -2135,6 +2135,110 @@ async def agenda(interaction: discord.Interaction):
 
 
 # =============================================
+#  Slash command: /test-agenda  (post to test channel)
+# =============================================
+@tree.command(
+    name="test-agenda",
+    description="ทดสอบโพสต์ agenda ในช่องทดสอบ (Admin เท่านั้น)",
+)
+async def test_agenda(interaction: discord.Interaction):
+    if not any(r.name == "Admin" for r in interaction.user.roles):
+        await interaction.response.send_message(
+            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        test_channel = client.get_channel(1503578584961515691)
+        if not test_channel:
+            test_channel = await client.fetch_channel(1503578584961515691)
+
+        today    = datetime.now(BANGKOK_TZ).date()
+        end_date = today + timedelta(days=13)
+
+        day_map: dict = {}
+        for e in load_events(EVENTS_FILE):
+            ev_start = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            ev_end   = datetime.strptime(e.get("end_date", e["date"]), "%Y-%m-%d").date()
+            if ev_end < today or ev_start > end_date:
+                continue
+            first_day = max(ev_start, today)
+            day_map.setdefault(first_day, []).append(e)
+
+        months = set()
+        d = today
+        while d <= end_date:
+            months.add((d.year, d.month))
+            d += timedelta(days=1)
+        for rec in load_recurring():
+            for y, m in months:
+                for ev in expand_recurring_for_month(rec, y, m):
+                    ev_date = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+                    if today <= ev_date <= end_date:
+                        day_map.setdefault(ev_date, []).append(ev)
+
+        cat_labels = load_cat_labels()
+        cat_ansi   = load_cat_ansi()
+
+        if not day_map:
+            await test_channel.send(
+                f"[TEST] ไม่มีกิจกรรมในช่วง {today.day} {TH_MONTHS[today.month]} – "
+                f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
+            )
+        else:
+            lines: list[str] = []
+            for d in sorted(day_map.keys()):
+                wd          = TH_WEEKDAYS[d.weekday()]
+                date_header = f"วัน{wd}ที่ {d.day} {TH_MONTHS[d.month]} {d.year + 543}"
+                if d == today:
+                    date_header += "  ◀ วันนี้"
+                lines.append(_ansi(date_header, "37", bold=True))
+                lines.append("─" * 34)
+
+                for ev in day_map[d]:
+                    cat_key = ev.get("cat", "")
+                    code    = cat_ansi.get(cat_key, "37")
+                    cat_lbl = cat_labels.get(cat_key, cat_key)
+                    detail  = ev.get("detail", "")
+
+                    if ev.get("end_date") and ev["end_date"] != ev["date"]:
+                        ev_s = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+                        ev_e = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
+                        if ev_s.month == ev_e.month:
+                            date_lbl = f"{ev_s.day}–{ev_e.day} {TH_MONTHS[ev_s.month]}"
+                        else:
+                            date_lbl = f"{ev_s.day} {TH_MONTHS[ev_s.month]} – {ev_e.day} {TH_MONTHS[ev_e.month]}"
+                    else:
+                        date_lbl = f"{d.day} {TH_MONTHS[d.month]}"
+
+                    lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))
+                    lines.append(_ansi(f"     {cat_lbl}  ·  {date_lbl}", code, dim=True))
+                    if detail:
+                        lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
+                lines.append("")
+
+            description = "```ansi\n" + "\n".join(lines) + "```"
+            if len(description) > 4000:
+                description = description[:3990] + "\n…```"
+
+            embed = discord.Embed(
+                title=(
+                    f"[TEST] 📋  กิจกรรม 14 วันข้างหน้า  —  "
+                    f"{today.day} {TH_MONTHS[today.month]} – "
+                    f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
+                ),
+                description=description,
+                color=0x95A5A6,
+            )
+            embed.set_footer(text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+            await test_channel.send(embed=embed)
+
+        await interaction.followup.send("✅ ส่งไปช่องทดสอบแล้วครับ", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+
+
+# =============================================
 #  on_message — auto-process file uploads in resources channel
 # =============================================
 @client.event
