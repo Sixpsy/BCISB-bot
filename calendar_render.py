@@ -106,7 +106,10 @@ def _month_cells(events, year, month):
                 continue
 
             is_today = (date(year, month, day) == today)
-            day_evts = event_map.get(day, [])
+            day_evts = sorted(
+                event_map.get(day, []),
+                key=lambda e: (0 if e.get("end_date") and e["end_date"] != e["date"] else 1, e["date"])
+            )
             evts_html = ""
 
             for ev in day_evts[:2]:
