@@ -62,7 +62,7 @@ Everything lives in two Python files:
 
 | File | Purpose |
 |---|---|
-| `events.json` | One-off events: `{date, name, cat, detail}` |
+| `events.json` | One-off events: `{date, name, cat, detail, end_date}` (end_date optional, for multi-day events) |
 | `recurring.json` | Recurring events with weekday, frequency, and `excluded_dates` |
 | `dresscode.json` | Weekly schedule by weekday index + date-specific overrides |
 | `categories.json` | 4 event categories with display labels, hex colors, and ANSI codes |
@@ -74,7 +74,7 @@ Everything lives in two Python files:
 
 | Task | Schedule | Action |
 |---|---|---|
-| `daily_channel_reminder` | 06:00 | Post `@everyone` embed of today's events |
+| `daily_channel_reminder` | 06:00 | Post `@everyone` embed of today's events (includes multi-day events whose range covers today) |
 | `delete_daily_reminder` | 00:00 | Delete the morning reminder from the previous day |
 | `daily_dress_reminder` | 06:02 | Post today's + tomorrow's dress code |
 | `monthly_calendar` | 06:05, 1st of month | Auto-post full calendar image |
@@ -82,7 +82,7 @@ Everything lives in two Python files:
 
 ### Holiday detection
 
-`bot.py` has a `is_holiday(date)` helper that checks: (1) weekend, and (2) whether any event on that date has `cat == "holiday"`. Dress code and daily reminders both use this to suppress non-school-day output.
+`bot.py` has an `is_holiday_or_weekend(date) -> (bool, name)` helper that returns `(True, holiday_name)` when: (1) any event that day has `cat == "holiday"`, or (2) the day is a weekend — UNLESS there's a non-holiday event scheduled that day (e.g. a Saturday activity), in which case it returns `(False, "")` and the day is treated as a school day. Dress code and daily reminders both use this to suppress non-school-day output.
 
 ### Calendar rendering pipeline
 
@@ -100,8 +100,9 @@ A private channel (ID `1503578584961515691`, not visible to parents) exists for 
 |---|---|
 | `/test-dress` | Dress code embed (grey colour, `[TEST]` footer) |
 | `/test-calendar` | 2-month calendar image + event list (grey colour, `[TEST]` title) |
+| `/test-agenda` | 14-day agenda embed (grey colour, `[TEST]` title) |
 
-Neither command touches or purges the real channels.
+None of these commands touch or purge the real channels.
 
 ## Known bugs fixed
 

@@ -17,19 +17,24 @@ A Discord bot for parent communication in a school class. It displays an event c
 
 **Slash Commands — Parents**
 - `/calendar` — Shows a **2-month calendar** (current + next month) as a side-by-side image, with ANSI-colored event list and "today" marker
+- `/agenda` — Shows the next 14 days as a detailed embed (ephemeral) with categories and details
 - `/remind` — Personal DM reminder subscription with timing choices (1h, 3h, 1 day, 3 days, 1 week before)
 - `/my-reminders` — View and cancel personal reminder subscriptions with dropdown
 - `/help` — Shows available commands in Thai (parent commands for everyone, admin commands for Admin role only)
 
 **Slash Commands — Admin Only**
-- `/add-event` — Add event with date, category autocomplete, name, and optional detail
+- `/add-event` — Add event with date (single or `end_date` for multi-day), category autocomplete, name, and optional detail
 - `/remove-event` — Remove event or recurring series with autocomplete
 - `/add-recurring` — Add recurring events (weekly/biweekly on a specific weekday)
 - `/skip-event` — Skip a recurring event on a specific date (e.g. holidays)
-- `/post-resource` — Paste email/app content manually as structured embed + thread
 - `/set-dress-schedule` — Set default dress code for each weekday
 - `/set-dress` — Set dress code override for a specific date
 - `/post-dress` — Manually trigger dress code post
+
+**Slash Commands — Admin Only, Test Channel**
+- `/test-dress` — Preview the dress-code embed in the private test channel
+- `/test-calendar` — Preview the 2-month calendar in the test channel
+- `/test-agenda` — Preview the 14-day agenda in the test channel
 
 **Calendar Rendering (`calendar_render.py`)**
 - Generates calendar images by rendering HTML → screenshot via **Playwright async API**
@@ -39,9 +44,9 @@ A Discord bot for parent communication in a school class. It displays an event c
 - ANSI-colored event list with category labels and details
 
 **Daily Automation**
-- **Daily calendar reminder** (06:00 UTC+7): Posts `@everyone` embed listing today's events. Skips holidays and weekends. Auto-deleted at midnight.
-- **Daily dress code** (06:00 UTC+7): Posts today's and tomorrow's dress code. Skips holidays and weekends. Shows upcoming special dress days.
-- **Monthly auto-post**: Posts calendar on the 1st of each month.
+- **Daily calendar reminder** (06:00 UTC+7): Posts `@everyone` embed listing today's events (including any multi-day event whose range covers today). Skips holidays and weekends. Auto-deleted at midnight.
+- **Daily dress code** (06:02 UTC+7): Posts today's and tomorrow's dress code. Skips holidays and weekends. Shows upcoming special dress days.
+- **Monthly auto-post** (06:05 UTC+7 on the 1st): Posts the 2-month calendar.
 - **DM reminder checker**: Runs every 5 minutes, sends DMs when reminder time arrives.
 
 **Reminder System**
@@ -51,7 +56,6 @@ A Discord bot for parent communication in a school class. It displays an event c
 
 **Resource Storage**
 - Dedicated `#resources` channel
-- `/post-resource` for manual text paste
 - File upload listener: Admin drops PDF/image → auto-extract text → embed card + thread
 - PDF text extraction via PyMuPDF
 - Date detection in documents with buttons to add dates to calendar
@@ -111,6 +115,5 @@ python bot.py
 - **Thai-friendly date input**: Accept `20/5/2569` or `20 พ.ค.` format in `/add-event`
 - **AI Q&A (`/ask`)**: Answer parent questions from `resources.json` + `events.json` using LLM API
 - **Event detail button**: "📋 ดูรายละเอียด" button under calendar image for full event details
-- **Multi-day events**: Support date ranges (start_date + end_date)
 - **Event editing**: `/edit-event` command to modify existing events without remove+add
 - **Past event cleanup**: Automatic removal of past events from `events.json`

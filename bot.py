@@ -12,8 +12,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import aiohttp
 from calendar_render import (
-    generate_calendar_image, generate_two_month_image,
-    load_events, build_event_map, TH_MONTHS, next_month,
+    generate_two_month_image,
+    load_events, TH_MONTHS, next_month,
 )
 
 # Optional deps — bot works without them but OCR/PDF won't extract text
@@ -112,6 +112,9 @@ _dress_id = os.getenv("DRESS_CHANNEL_ID")
 DRESS_CHANNEL_ID = int(_dress_id) if _dress_id else None
 DRESSCODE_FILE   = BASE_DIR / "dresscode.json"
 
+# Private test channel (not visible to parents) — admin /test-* commands post here
+TEST_CHANNEL_ID = int(os.getenv("TEST_CHANNEL_ID", "1503578584961515691"))
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True          # Required for on_member_join welcome DM
@@ -123,6 +126,14 @@ tree   = app_commands.CommandTree(client)
 # =============================================
 #  Calendar state: track posted message IDs
 # =============================================
+def save_json_atomic(path: Path, data) -> None:
+    """Write JSON to a sibling .tmp file then os.replace() so a crash mid-write
+    can never truncate the live file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
 def load_state() -> dict:
     if STATE_FILE.exists():
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -130,8 +141,7 @@ def load_state() -> dict:
     return {}
 
 def save_state(state: dict):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    save_json_atomic(STATE_FILE, state)
 
 def get_month_events(events: list, year: int, month: int) -> list:
     result = []
@@ -149,8 +159,11 @@ def load_reminders() -> list:
     return []
 
 def save_reminders(reminders: list):
-    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(reminders, f, ensure_ascii=False, indent=2)
+    save_json_atomic(REMINDERS_FILE, reminders)
+
+def save_events(events: list):
+    """Atomic write for events.json (one-off events)."""
+    save_json_atomic(EVENTS_FILE, events)
 
 
 # ---- Resource storage ----
@@ -161,8 +174,7 @@ def load_resources() -> list:
     return []
 
 def save_resources(resources: list):
-    with open(RESOURCES_FILE, "w", encoding="utf-8") as f:
-        json.dump(resources, f, ensure_ascii=False, indent=2)
+    save_json_atomic(RESOURCES_FILE, resources)
 
 
 # ---- Recurring events ----
@@ -173,8 +185,7 @@ def load_recurring() -> list:
     return []
 
 def save_recurring(recurring: list):
-    with open(RECURRING_FILE, "w", encoding="utf-8") as f:
-        json.dump(recurring, f, ensure_ascii=False, indent=2)
+    save_json_atomic(RECURRING_FILE, recurring)
 
 def expand_recurring_for_month(rec: dict, year: int, month: int) -> list:
     """Expand a recurring event into individual event dicts for a given month."""
@@ -226,8 +237,7 @@ def load_dresscode() -> dict:
     return {"schedule": {}, "overrides": {}}
 
 def save_dresscode(dc: dict):
-    with open(DRESSCODE_FILE, "w", encoding="utf-8") as f:
-        json.dump(dc, f, ensure_ascii=False, indent=2)
+    save_json_atomic(DRESSCODE_FILE, dc)
 
 def get_dress_for_date(d: date) -> dict | None:
     """Return dress info dict for a date, checking overrides then weekly schedule."""
@@ -318,16 +328,54 @@ def get_upcoming_special_days(after: date) -> list[tuple[date, dict]]:
 
 _dress_last_posted: date | None = None
 
-async def post_dress_code(target_date: date = None):
-    """Purge the dress channel, then post a fresh dress-code embed."""
+async def post_dress_code(target_date: date = None, force: bool = False):
+    """Purge the dress channel, then post a fresh dress-code embed.
+
+    `force=True` bypasses the once-per-day idempotency guard (used by the
+    manual /post-dress slash command so admins can re-post on demand).
+    """
     global _dress_last_posted
     async with _dress_post_lock:
         today = target_date or datetime.now(BANGKOK_TZ).date()
-        if _dress_last_posted == today:
+        if not force and _dress_last_posted == today:
             print(f"[dress] Already posted for {today}, skipping duplicate trigger")
             return
         await _post_dress_code_inner(target_date)
         _dress_last_posted = today
+
+
+def build_dress_embed(today: date, test_mode: bool = False) -> discord.Embed:
+    """Embed for today + next school day's dress code, plus upcoming specials.
+    Shared by `_post_dress_code_inner` (live) and `/test-dress` (test channel)."""
+    tomorrow      = next_school_day(today)
+    today_info    = get_dress_for_date(today)
+    tomorrow_info = get_dress_for_date(tomorrow)
+    specials      = get_upcoming_special_days(after=today)
+
+    SEP  = "\n​\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n​\n"
+    desc = (
+        _dress_section(today,    today_info,    "🌅") +
+        SEP +
+        _dress_section(tomorrow, tomorrow_info, "🌄")
+    )
+    if specials:
+        lines = ["### 📌  วันแต่งกายพิเศษที่กำลังจะมาถึง\n"]
+        for d, info in specials:
+            wd       = TH_WEEKDAYS[d.weekday()]
+            date_lbl = f"**{d.day} {TH_MONTHS[d.month]} {d.year + 543}**  ({wd})"
+            dress    = info.get("dress", "—")
+            note     = f"  _— {info['note']}_" if info.get("note") else ""
+            lines.append(f"◆  {date_lbl}  —  {dress}{note}")
+        desc += SEP + "\n".join(lines)
+
+    title  = "👗  แจ้งเครื่องแต่งกาย" + ("  [ทดสอบ]" if test_mode else "")
+    color  = 0x95A5A6 if test_mode else 0x1ABC9C
+    embed  = discord.Embed(title=title, description=desc, color=color)
+    prefix = "[TEST] " if test_mode else ""
+    embed.set_footer(
+        text=f"{prefix}อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น."
+    )
+    return embed
 
 
 async def _post_dress_code_inner(target_date: date = None):
@@ -342,50 +390,31 @@ async def _post_dress_code_inner(target_date: date = None):
             print(f"[dress] Cannot find channel {DRESS_CHANNEL_ID}: {e}")
             return
 
-    today    = target_date or datetime.now(BANGKOK_TZ).date()
-    tomorrow = next_school_day(today)
-
-    today_info    = get_dress_for_date(today)
-    tomorrow_info = get_dress_for_date(tomorrow)
-    specials      = get_upcoming_special_days(after=today)
-
-    SEP  = "\n\u200b\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\u200b\n"
-    desc = (
-        _dress_section(today,    today_info,    "🌅") +
-        SEP +
-        _dress_section(tomorrow, tomorrow_info, "🌄")
-    )
-
-    # Append upcoming special dress days if any exist
-    if specials:
-        lines = ["### 📌  วันแต่งกายพิเศษที่กำลังจะมาถึง\n"]
-        for d, info in specials:
-            wd       = TH_WEEKDAYS[d.weekday()]
-            date_lbl = f"**{d.day} {TH_MONTHS[d.month]} {d.year + 543}**  ({wd})"
-            dress    = info.get("dress", "—")
-            note     = f"  _— {info['note']}_" if info.get("note") else ""
-            lines.append(f"◆  {date_lbl}  —  {dress}{note}")
-        desc += SEP + "\n".join(lines)
-
-    embed = discord.Embed(
-        title="👗  แจ้งเครื่องแต่งกาย",
-        description=desc,
-        color=0x1ABC9C,
-    )
-    embed.set_footer(
-        text=f"อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น."
-    )
+    today = target_date or datetime.now(BANGKOK_TZ).date()
+    embed = build_dress_embed(today)
 
     # Post the new embed FIRST, then delete old messages.
     # This prevents purge from killing a deferred slash-command interaction
     # that lives in the same channel (e.g. /post-dress used inside #dress).
     new_msg = await channel.send(embed=embed)
 
-    # Now purge everything except the message we just sent
+    # Now purge everything except the message we just sent.
+    # Bulk-delete only works on messages <14 days old; older messages are
+    # walked individually so the channel never accumulates stale posts.
     try:
-        await channel.purge(limit=50, check=lambda m: m.id != new_msg.id)
+        await channel.purge(limit=200, check=lambda m: m.id != new_msg.id)
     except Exception as e:
         print(f"[dress] Purge failed: {e}")
+    try:
+        async for old in channel.history(limit=50, before=new_msg):
+            if old.id == new_msg.id:
+                continue
+            try:
+                await old.delete()
+            except discord.HTTPException:
+                pass
+    except Exception as e:
+        print(f"[dress] Old-message sweep failed: {e}")
 
     print(f"[dress] Posted dress code — today={today} / tomorrow={tomorrow} / specials={len(specials)}")
 
@@ -654,19 +683,6 @@ async def clear_channel_messages(channel):
         print(f"[clear_channel] Purge failed: {e}")
 
 
-def build_changelog(old_events: list, new_events: list) -> str:
-    old_set = {(e["date"], e["name"], e["cat"]) for e in old_events}
-    new_set = {(e["date"], e["name"], e["cat"]) for e in new_events}
-    added   = new_set - old_set
-    removed = old_set - new_set
-    lines = []
-    for d, name, cat in sorted(added):
-        lines.append(f"\u2795 เพิ่ม: **{name}** ({d})")
-    for d, name, cat in sorted(removed):
-        lines.append(f"\u274c ลบ: **{name}** ({d})")
-    return "\n".join(lines) if lines else ""
-
-
 def format_event_list(events_by_month: list, cat_ansi: dict = None) -> str:
     """Build a formatted event list.
 
@@ -798,6 +814,10 @@ class AddEventModal(discord.ui.Modal):
             )
             return
 
+        # Defer immediately — post_two_month_calendar takes seconds (Playwright render)
+        # and would exceed Discord's 3-second modal response window.
+        await interaction.response.defer(ephemeral=True)
+
         date_str = self.detected_date.strftime("%Y-%m-%d")
         name     = self.event_name.value.strip()
         detail   = self.detail.value.strip() if self.detail.value else ""
@@ -807,13 +827,12 @@ class AddEventModal(discord.ui.Modal):
         if detail:
             event["detail"] = detail
         events.append(event)
-        with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(events, f, ensure_ascii=False, indent=2)
+        save_events(events)
 
         await post_two_month_calendar()
         th_month = TH_MONTHS[self.detected_date.month]
         detail_note = f"\n   _{detail}_" if detail else ""
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ เพิ่ม **{name}** ({self.detected_date.day} {th_month} "
             f"{self.detected_date.year + 543}) ลงปฏิทินแล้ว{detail_note}",
             ephemeral=True,
@@ -863,8 +882,10 @@ async def daily_channel_reminder():
     events = load_events(EVENTS_FILE)
     today_events = [
         e for e in events
-        if e["date"] == today_str
-        or (e.get("end_date") and e["date"] <= today_str <= e["end_date"])
+        if e.get("date") and (
+            e["date"] == today_str
+            or (e.get("end_date") and e["date"] <= today_str <= e["end_date"])
+        )
     ]
     for rec in load_recurring():
         for ev in expand_recurring_for_month(rec, today_bkk.year, today_bkk.month):
@@ -1047,13 +1068,43 @@ async def daily_dress_reminder():
     await post_dress_code(today_bkk)
 
 
+async def build_two_month_calendar(year: int, month: int, test_mode: bool = False):
+    """Render two-month calendar image + return (embed, discord.File).
+    Used by post_two_month_calendar (live) and /test-calendar (test channel)."""
+    y2, m2 = next_month(year, month)
+    events  = get_combined_events_range(year, month, y2, m2)
+    img_path = await generate_two_month_image(year, month, events,
+                                              output=str(BASE_DIR / "calendar_2m.png"))
+    evts_m1 = get_month_events(events, year, month)
+    evts_m2 = get_month_events(events, y2, m2)
+    description = format_event_list(
+        [(year, month, evts_m1), (y2, m2, evts_m2)],
+        cat_ansi=load_cat_ansi(),
+    )
+
+    today_str = datetime.now(BANGKOK_TZ).date().strftime("%Y-%m-%d")
+    all_sorted = sorted(evts_m1 + evts_m2, key=lambda e: e["date"])
+    next_ev = next((e for e in all_sorted if e["date"] >= today_str), None)
+    if test_mode:
+        embed_color = 0x95A5A6
+    else:
+        embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
+
+    test_tag = "[TEST] " if test_mode else ""
+    if y2 != year:
+        cal_title = f"{test_tag}ปฏิทินกิจกรรม — {TH_MONTHS[month]} {year + 543} - {TH_MONTHS[m2]} {y2 + 543}"
+    else:
+        cal_title = f"{test_tag}ปฏิทินกิจกรรม — {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}"
+
+    embed = discord.Embed(title=cal_title, description=description, color=embed_color)
+    embed.set_image(url="attachment://calendar_2m.png")
+    embed.set_footer(text=f"{test_tag}อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+    file = discord.File(img_path, filename="calendar_2m.png")
+    return embed, file
+
+
 async def post_two_month_calendar(year: int = None, month: int = None):
-    """
-    Clear the calendar channel and post the 2-month calendar directly.
-    Always posts via channel.send() so the message is a plain channel message
-    that future purges can delete cleanly.  No pinning — the calendar is
-    always the only (or latest) message after a purge.
-    """
+    """Render the 2-month calendar and replace the calendar channel's contents."""
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
         try:
@@ -1065,87 +1116,12 @@ async def post_two_month_calendar(year: int = None, month: int = None):
     today = datetime.now(BANGKOK_TZ).date()
     year  = year  or today.year
     month = month or today.month
-    y2, m2 = next_month(year, month)
-
-    events   = get_combined_events_range(year, month, y2, m2)
-    img_path = await generate_two_month_image(year, month, events,
-                                              output=str(BASE_DIR / "calendar_2m.png"))
-
-    evts_m1 = get_month_events(events, year, month)
-    evts_m2 = get_month_events(events, y2, m2)
-    description = format_event_list(
-        [(year, month, evts_m1), (y2, m2, evts_m2)],
-        cat_ansi=load_cat_ansi(),
-    )
-
-    # Color the embed stripe using the next upcoming event's category color.
-    all_sorted = sorted(evts_m1 + evts_m2, key=lambda e: e["date"])
-    today_str  = datetime.now(BANGKOK_TZ).date().strftime("%Y-%m-%d")
-    next_ev    = next((e for e in all_sorted if e["date"] >= today_str), None)
-    embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
-
-    if y2 != year:
-        cal_title = f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} {year + 543} - {TH_MONTHS[m2]} {y2 + 543}"
-    else:
-        cal_title = f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}"
-    embed = discord.Embed(
-        title=cal_title,
-        description=description,
-        color=embed_color,
-    )
-    embed.set_image(url="attachment://calendar_2m.png")
-    embed.set_footer(text=f"อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+    embed, file = await build_two_month_calendar(year, month)
 
     await clear_channel_messages(channel)
-
-    file = discord.File(img_path, filename="calendar_2m.png")
     msg = await channel.send(file=file, embed=embed)
-    print(f"[calendar] Posted 2-month calendar ({TH_MONTHS[month]}-{TH_MONTHS[m2]}) → msg {msg.id}")
+    print(f"[calendar] Posted 2-month calendar starting {TH_MONTHS[month]} {year + 543} → msg {msg.id}")
 
-
-async def post_calendar(year: int, month: int):
-    """Auto-post: single-month calendar with changelog, used by the monthly background task."""
-    channel = client.get_channel(CHANNEL_ID)
-    if not channel:
-        return
-
-    events   = load_events(EVENTS_FILE)
-    img_path = await generate_calendar_image(year, month, events,
-                                             output=str(BASE_DIR / "calendar.png"))
-
-    state     = load_state()
-    state_key = f"{year}-{month}"
-    old_entry  = state.get(state_key, {})
-    old_events = old_entry.get("events", [])
-    new_events = get_month_events(events, year, month)
-    changelog  = build_changelog(old_events, new_events)
-
-    description = format_event_list([(year, month, new_events)], cat_ansi=load_cat_ansi())
-
-    today_str   = date.today().strftime("%Y-%m-%d")
-    next_ev     = next((e for e in sorted(new_events, key=lambda e: e["date"])
-                        if e["date"] >= today_str), None)
-    embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
-
-    embed = discord.Embed(
-        title=f"ปฏิทินกิจกรรม \u2014 {TH_MONTHS[month]} {year + 543}",
-        description=description,
-        color=embed_color,
-    )
-    embed.set_image(url="attachment://calendar.png")
-    if changelog:
-        embed.add_field(name="\U0001f4dd บันทึกการเปลี่ยนแปลง", value=changelog, inline=False)
-    embed.set_footer(text=f"อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
-
-    await clear_channel_messages(channel)
-
-    file = discord.File(img_path, filename="calendar.png")
-    msg  = await channel.send(file=file, embed=embed)
-    print(f"[post_calendar] Sent new message {msg.id}")
-
-    state[state_key] = {"message_id": msg.id, "events": new_events}
-    save_state(state)
-    print(f"[post_calendar] State saved: {state_key} -> {msg.id}")
 
 
 # =============================================
@@ -1196,6 +1172,7 @@ async def show_calendar(
     detail="รายละเอียดเพิ่มเติม (ไม่บังคับ)",
 )
 @app_commands.autocomplete(cat=category_autocomplete)
+@app_commands.checks.has_role("Admin")
 async def add_event(
     interaction: discord.Interaction,
     date_str: str,
@@ -1204,11 +1181,6 @@ async def add_event(
     end_date_str: str = None,
     detail: str = None,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     try:
         start_date = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -1244,8 +1216,7 @@ async def add_event(
     if detail and detail.strip():
         event["detail"] = detail.strip()
     events.append(event)
-    with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(events, f, ensure_ascii=False, indent=2)
+    save_events(events)
 
     date_label = f"{date_str} ถึง {end_date_str}" if end_date_str else date_str
     detail_note = f"\n   _{detail.strip()}_" if detail and detail.strip() else ""
@@ -1279,10 +1250,13 @@ async def all_event_autocomplete(
             choices.append(app_commands.Choice(name=label[:100], value=value[:100]))
     # Recurring series (prefix "series|")
     for rec in load_recurring():
-        freq = "ทุกสัปดาห์" if rec["recurrence"] == "weekly" else "ทุก 2 สัปดาห์"
-        wd   = TH_WEEKDAYS[rec["weekday"]]
-        label = f"🔁 {rec['name']} ({freq} วัน{wd})"
-        value = f"series|{rec['id']}|{rec['name']}"
+        wd_idx = rec.get("weekday")
+        if wd_idx is None or not (0 <= wd_idx < len(TH_WEEKDAYS)):
+            continue
+        freq = "ทุกสัปดาห์" if rec.get("recurrence") == "weekly" else "ทุก 2 สัปดาห์"
+        wd   = TH_WEEKDAYS[wd_idx]
+        label = f"🔁 {rec.get('name','?')} ({freq} วัน{wd})"
+        value = f"series|{rec.get('id','')}|{rec.get('name','?')}"
         if current.lower() in label.lower() or current == "":
             choices.append(app_commands.Choice(name=label[:100], value=value[:100]))
     return choices[:25]
@@ -1296,15 +1270,11 @@ async def all_event_autocomplete(
     event="เลือกกิจกรรมที่ต้องการลบ (🔁 = กิจกรรมประจำ)",
 )
 @app_commands.autocomplete(event=all_event_autocomplete)
+@app_commands.checks.has_role("Admin")
 async def remove_event(
     interaction: discord.Interaction,
     event: str,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     parts = event.split("|", 2)
     if len(parts) < 3:
         await interaction.response.send_message(
@@ -1322,8 +1292,7 @@ async def remove_event(
                 f"ไม่พบกิจกรรม **{name}** วันที่ {date_str}", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(filtered, f, ensure_ascii=False, indent=2)
+        save_events(filtered)
         remove_desc = f"\U0001f5d1\ufe0f ลบกิจกรรม **{name}** วันที่ {date_str} แล้วครับ"
 
     elif prefix == "series":
@@ -1382,6 +1351,7 @@ async def remove_event(
         app_commands.Choice(name="อาทิตย์",    value="6"),
     ],
 )
+@app_commands.checks.has_role("Admin")
 async def add_recurring(
     interaction: discord.Interaction,
     name: str,
@@ -1392,11 +1362,6 @@ async def add_recurring(
     end_date: str = None,
     detail: str = None,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     cat = cat.strip().lower()
     if cat not in load_categories():
         valid = ", ".join(sorted(load_categories()))
@@ -1464,11 +1429,15 @@ async def recurring_autocomplete(
     """Return all recurring series as autocomplete choices."""
     choices = []
     for rec in load_recurring():
-        freq  = "ทุกสัปดาห์" if rec["recurrence"] == "weekly" else "ทุก 2 สัปดาห์"
-        wd    = TH_WEEKDAYS[rec["weekday"]]
-        label = f"{rec['name']} ({freq} วัน{wd})"
+        wd_idx = rec.get("weekday")
+        rec_id = rec.get("id")
+        if wd_idx is None or not (0 <= wd_idx < len(TH_WEEKDAYS)) or not rec_id:
+            continue
+        freq  = "ทุกสัปดาห์" if rec.get("recurrence") == "weekly" else "ทุก 2 สัปดาห์"
+        wd    = TH_WEEKDAYS[wd_idx]
+        label = f"{rec.get('name','?')} ({freq} วัน{wd})"
         if current.lower() in label.lower() or current == "":
-            choices.append(app_commands.Choice(name=label[:100], value=rec["id"][:100]))
+            choices.append(app_commands.Choice(name=label[:100], value=rec_id[:100]))
     return choices[:25]
 
 
@@ -1481,16 +1450,12 @@ async def recurring_autocomplete(
     date_str="วันที่ต้องการข้าม (YYYY-MM-DD)",
 )
 @app_commands.autocomplete(event=recurring_autocomplete)
+@app_commands.checks.has_role("Admin")
 async def skip_event(
     interaction: discord.Interaction,
     event: str,
     date_str: str,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -1744,77 +1709,6 @@ async def my_reminders(interaction: discord.Interaction):
 
 
 # =============================================
-#  Slash command: /post-resource  (manual text paste)
-# =============================================
-@tree.command(
-    name="post-resource",
-    description="โพสต์เอกสาร/อีเมลจากโรงเรียนไปยังห้อง resources (Admin เท่านั้น)",
-)
-@app_commands.describe(
-    title="หัวข้อ/ชื่อเอกสาร",
-    source="แหล่งที่มา",
-    date_str="วันที่ของเอกสาร (YYYY-MM-DD)",
-    content="วางเนื้อหาข้อความที่นี่ (สูงสุด 3900 ตัวอักษรต่อครั้ง)",
-)
-@app_commands.choices(source=[
-    app_commands.Choice(name="📧 อีเมลโรงเรียน", value="email"),
-    app_commands.Choice(name="📱 แอปโรงเรียน",   value="app"),
-    app_commands.Choice(name="📄 อื่นๆ",          value="other"),
-])
-async def post_resource(
-    interaction: discord.Interaction,
-    title: str,
-    source: app_commands.Choice[str],
-    date_str: str,
-    content: str,
-):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
-    if not RESOURCES_CHANNEL_ID:
-        await interaction.response.send_message(
-            "ยังไม่ได้ตั้งค่า `RESOURCES_CHANNEL_ID` ใน .env", ephemeral=True)
-        return
-
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        await interaction.response.send_message(
-            "รูปแบบวันที่ไม่ถูกต้อง ใช้ YYYY-MM-DD เช่น 2026-03-31", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    channel = client.get_channel(RESOURCES_CHANNEL_ID)
-    if not channel:
-        await interaction.followup.send("ไม่พบห้อง resources กรุณาตรวจสอบ RESOURCES_CHANNEL_ID", ephemeral=True)
-        return
-
-    msg_id, thread_id = await post_resource_to_channel(
-        channel, title, source.value, date_str, content
-    )
-
-    resources = load_resources()
-    resources.append({
-        "id":         str(uuid.uuid4()),
-        "title":      title,
-        "source":     source.value,
-        "date":       date_str,
-        "content":    content,
-        "message_id": msg_id,
-        "thread_id":  thread_id,
-        "filename":   None,
-        "added_at":   datetime.now(BANGKOK_TZ).isoformat(),
-    })
-    save_resources(resources)
-
-    await interaction.followup.send(
-        f"✅ โพสต์ **{title}** ไปยัง <#{RESOURCES_CHANNEL_ID}> แล้ว", ephemeral=True)
-
-
-# =============================================
 #  Slash command: /set-dress-schedule  (weekday default)
 # =============================================
 @tree.command(
@@ -1833,17 +1727,13 @@ async def post_resource(
     app_commands.Choice(name="พฤหัสบดี", value="3"),
     app_commands.Choice(name="ศุกร์",     value="4"),
 ])
+@app_commands.checks.has_role("Admin")
 async def set_dress_schedule(
     interaction: discord.Interaction,
     weekday: app_commands.Choice[str],
     dress: str,
     note: str = None,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     dc = load_dresscode()
     dc.setdefault("schedule", {})[weekday.value] = {"dress": dress.strip()}
     if note and note.strip():
@@ -1869,17 +1759,13 @@ async def set_dress_schedule(
     dress="ชื่อชุดที่ต้องสวมใส่",
     note="หมายเหตุเพิ่มเติม (ไม่บังคับ)",
 )
+@app_commands.checks.has_role("Admin")
 async def set_dress(
     interaction: discord.Interaction,
     date_str: str,
     dress: str,
     note: str = None,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
@@ -1906,15 +1792,11 @@ async def set_dress(
     name="post-dress",
     description="โพสต์แจ้งเครื่องแต่งกายทันที (Admin เท่านั้น)",
 )
+@app_commands.checks.has_role("Admin")
 async def post_dress(interaction: discord.Interaction):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
     try:
-        await post_dress_code()
+        await post_dress_code(force=True)
         await interaction.followup.send("✅ โพสต์แจ้งเครื่องแต่งกายแล้วครับ", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
@@ -1927,48 +1809,16 @@ async def post_dress(interaction: discord.Interaction):
     name="test-dress",
     description="ทดสอบโพสต์แจ้งเครื่องแต่งกายในช่องทดสอบ (Admin เท่านั้น)",
 )
+@app_commands.checks.has_role("Admin")
 async def test_dress(interaction: discord.Interaction):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
     try:
-        test_channel = client.get_channel(1503578584961515691)
+        test_channel = client.get_channel(TEST_CHANNEL_ID)
         if not test_channel:
-            test_channel = await client.fetch_channel(1503578584961515691)
+            test_channel = await client.fetch_channel(TEST_CHANNEL_ID)
 
         today = datetime.now(BANGKOK_TZ).date()
-        tomorrow = next_school_day(today)
-        today_info = get_dress_for_date(today)
-        tomorrow_info = get_dress_for_date(tomorrow)
-        specials = get_upcoming_special_days(after=today)
-
-        SEP = "\n​\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n​\n"
-        desc = (
-            _dress_section(today, today_info, "🌅") +
-            SEP +
-            _dress_section(tomorrow, tomorrow_info, "🌄")
-        )
-        if specials:
-            lines = ["### 📌  วันแต่งกายพิเศษที่กำลังจะมาถึง\n"]
-            for d, info in specials:
-                wd = TH_WEEKDAYS[d.weekday()]
-                date_lbl = f"**{d.day} {TH_MONTHS[d.month]} {d.year + 543}**  ({wd})"
-                dress = info.get("dress", "—")
-                note = f"  _— {info['note']}_" if info.get("note") else ""
-                lines.append(f"◆  {date_lbl}  —  {dress}{note}")
-            desc += SEP + "\n".join(lines)
-
-        embed = discord.Embed(
-            title="👗  แจ้งเครื่องแต่งกาย [ทดสอบ]",
-            description=desc,
-            color=0x95A5A6,
-        )
-        embed.set_footer(
-            text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น."
-        )
+        embed = build_dress_embed(today, test_mode=True)
         await test_channel.send(embed=embed)
         await interaction.followup.send("✅ ส่งไปช่องทดสอบแล้วครับ", ephemeral=True)
     except Exception as e:
@@ -1986,73 +1836,35 @@ async def test_dress(interaction: discord.Interaction):
     month="เดือนเริ่มต้น (1-12) ถ้าไม่ระบุ = เดือนปัจจุบัน",
     year="ปี ค.ศ. ถ้าไม่ระบุ = ปีปัจจุบัน",
 )
+@app_commands.checks.has_role("Admin")
 async def test_calendar(
     interaction: discord.Interaction,
     month: int = None,
     year: int = None,
 ):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
     try:
-        test_channel = client.get_channel(1503578584961515691)
+        test_channel = client.get_channel(TEST_CHANNEL_ID)
         if not test_channel:
-            test_channel = await client.fetch_channel(1503578584961515691)
-
+            test_channel = await client.fetch_channel(TEST_CHANNEL_ID)
         today = datetime.now(BANGKOK_TZ).date()
         month = month or today.month
         year  = year  or today.year
-        y2, m2 = next_month(year, month)
-
-        events   = get_combined_events_range(year, month, y2, m2)
-        img_path = await generate_two_month_image(year, month, events,
-                                                  output=str(BASE_DIR / "calendar_2m.png"))
-        evts_m1 = get_month_events(events, year, month)
-        evts_m2 = get_month_events(events, y2, m2)
-        description = format_event_list(
-            [(year, month, evts_m1), (y2, m2, evts_m2)],
-            cat_ansi=load_cat_ansi(),
-        )
-        all_sorted = sorted(evts_m1 + evts_m2, key=lambda e: e["date"])
-        today_str  = today.strftime("%Y-%m-%d")
-        next_ev    = next((e for e in all_sorted if e["date"] >= today_str), None)
-        embed_color = cat_color_int(next_ev["cat"]) if next_ev else 0x534AB7
-
-        if y2 != year:
-            cal_title = f"[TEST] ปฏิทินกิจกรรม — {TH_MONTHS[month]} {year + 543} - {TH_MONTHS[m2]} {y2 + 543}"
-        else:
-            cal_title = f"[TEST] ปฏิทินกิจกรรม — {TH_MONTHS[month]} - {TH_MONTHS[m2]} {year + 543}"
-
-        embed = discord.Embed(title=cal_title, description=description, color=0x95A5A6)
-        embed.set_image(url="attachment://calendar_2m.png")
-        embed.set_footer(text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
-
-        file = discord.File(img_path, filename="calendar_2m.png")
+        embed, file = await build_two_month_calendar(year, month, test_mode=True)
         await test_channel.send(file=file, embed=embed)
         await interaction.followup.send("✅ ส่งปฏิทินไปช่องทดสอบแล้วครับ", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
 
 
-# =============================================
-#  Slash command: /agenda  (next 14 days)
-# =============================================
-@tree.command(
-    name="agenda",
-    description="แสดงกิจกรรมใน 14 วันข้างหน้าแบบละเอียด",
-)
-async def agenda(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    today    = datetime.now(BANGKOK_TZ).date()
+def build_agenda_embed(today: date, test_mode: bool = False) -> discord.Embed | None:
+    """Build the 14-day agenda embed; returns None when no events in range."""
     end_date = today + timedelta(days=13)
 
-    # ── Collect one-off events, multi-day events appear on their first visible day ──
     day_map: dict = {}
     for e in load_events(EVENTS_FILE):
+        if not e.get("date"):
+            continue
         ev_start = datetime.strptime(e["date"], "%Y-%m-%d").date()
         ev_end   = datetime.strptime(e.get("end_date", e["date"]), "%Y-%m-%d").date()
         if ev_end < today or ev_start > end_date:
@@ -2060,7 +1872,6 @@ async def agenda(interaction: discord.Interaction):
         first_day = max(ev_start, today)
         day_map.setdefault(first_day, []).append(e)
 
-    # ── Recurring events ──
     months = set()
     d = today
     while d <= end_date:
@@ -2073,16 +1884,11 @@ async def agenda(interaction: discord.Interaction):
                 if today <= ev_date <= end_date:
                     day_map.setdefault(ev_date, []).append(ev)
 
+    if not day_map:
+        return None
+
     cat_labels = load_cat_labels()
     cat_ansi   = load_cat_ansi()
-
-    if not day_map:
-        await interaction.followup.send(
-            f"ไม่มีกิจกรรมในช่วง {today.day} {TH_MONTHS[today.month]} – "
-            f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
-        )
-        return
-
     lines: list[str] = []
     for d in sorted(day_map.keys()):
         wd          = TH_WEEKDAYS[d.weekday()]
@@ -2091,13 +1897,11 @@ async def agenda(interaction: discord.Interaction):
             date_header += "  ◀ วันนี้"
         lines.append(_ansi(date_header, "37", bold=True))
         lines.append("─" * 34)
-
         for ev in day_map[d]:
             cat_key = ev.get("cat", "")
             code    = cat_ansi.get(cat_key, "37")
             cat_lbl = cat_labels.get(cat_key, cat_key)
             detail  = ev.get("detail", "")
-
             if ev.get("end_date") and ev["end_date"] != ev["date"]:
                 ev_s = datetime.strptime(ev["date"], "%Y-%m-%d").date()
                 ev_e = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
@@ -2107,31 +1911,48 @@ async def agenda(interaction: discord.Interaction):
                     date_lbl = f"{ev_s.day} {TH_MONTHS[ev_s.month]} – {ev_e.day} {TH_MONTHS[ev_e.month]}"
             else:
                 date_lbl = f"{d.day} {TH_MONTHS[d.month]}"
-
             lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))
             lines.append(_ansi(f"     {cat_lbl}  ·  {date_lbl}", code, dim=True))
             if detail:
                 lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
-
         lines.append("")
 
     description = "```ansi\n" + "\n".join(lines) + "```"
-
-    # Truncate if Discord's 4096-char embed limit is approached
     if len(description) > 4000:
         description = description[:3990] + "\n…```"
 
-    embed = discord.Embed(
-        title=(
-            f"📋  กิจกรรม 14 วันข้างหน้า  —  "
-            f"{today.day} {TH_MONTHS[today.month]} – "
-            f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
-        ),
-        description=description,
-        color=0x534AB7,
+    tag = "[TEST] " if test_mode else ""
+    title = (
+        f"{tag}📋  กิจกรรม 14 วันข้างหน้า  —  "
+        f"{today.day} {TH_MONTHS[today.month]} – "
+        f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
     )
-    embed.set_footer(text=f"อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
-    await interaction.followup.send(embed=embed)
+    color = 0x95A5A6 if test_mode else 0x534AB7
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_footer(text=f"{tag}อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
+    return embed
+
+
+# =============================================
+#  Slash command: /agenda  (next 14 days)
+# =============================================
+@tree.command(
+    name="agenda",
+    description="แสดงกิจกรรมใน 14 วันข้างหน้าแบบละเอียด",
+)
+async def agenda(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    today    = datetime.now(BANGKOK_TZ).date()
+    end_date = today + timedelta(days=13)
+    embed = build_agenda_embed(today)
+    if embed is None:
+        await interaction.followup.send(
+            f"ไม่มีกิจกรรมในช่วง {today.day} {TH_MONTHS[today.month]} – "
+            f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # =============================================
@@ -2141,98 +1962,23 @@ async def agenda(interaction: discord.Interaction):
     name="test-agenda",
     description="ทดสอบโพสต์ agenda ในช่องทดสอบ (Admin เท่านั้น)",
 )
+@app_commands.checks.has_role("Admin")
 async def test_agenda(interaction: discord.Interaction):
-    if not any(r.name == "Admin" for r in interaction.user.roles):
-        await interaction.response.send_message(
-            "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
     try:
-        test_channel = client.get_channel(1503578584961515691)
+        test_channel = client.get_channel(TEST_CHANNEL_ID)
         if not test_channel:
-            test_channel = await client.fetch_channel(1503578584961515691)
-
+            test_channel = await client.fetch_channel(TEST_CHANNEL_ID)
         today    = datetime.now(BANGKOK_TZ).date()
         end_date = today + timedelta(days=13)
-
-        day_map: dict = {}
-        for e in load_events(EVENTS_FILE):
-            ev_start = datetime.strptime(e["date"], "%Y-%m-%d").date()
-            ev_end   = datetime.strptime(e.get("end_date", e["date"]), "%Y-%m-%d").date()
-            if ev_end < today or ev_start > end_date:
-                continue
-            first_day = max(ev_start, today)
-            day_map.setdefault(first_day, []).append(e)
-
-        months = set()
-        d = today
-        while d <= end_date:
-            months.add((d.year, d.month))
-            d += timedelta(days=1)
-        for rec in load_recurring():
-            for y, m in months:
-                for ev in expand_recurring_for_month(rec, y, m):
-                    ev_date = datetime.strptime(ev["date"], "%Y-%m-%d").date()
-                    if today <= ev_date <= end_date:
-                        day_map.setdefault(ev_date, []).append(ev)
-
-        cat_labels = load_cat_labels()
-        cat_ansi   = load_cat_ansi()
-
-        if not day_map:
+        embed = build_agenda_embed(today, test_mode=True)
+        if embed is None:
             await test_channel.send(
                 f"[TEST] ไม่มีกิจกรรมในช่วง {today.day} {TH_MONTHS[today.month]} – "
                 f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
             )
         else:
-            lines: list[str] = []
-            for d in sorted(day_map.keys()):
-                wd          = TH_WEEKDAYS[d.weekday()]
-                date_header = f"วัน{wd}ที่ {d.day} {TH_MONTHS[d.month]} {d.year + 543}"
-                if d == today:
-                    date_header += "  ◀ วันนี้"
-                lines.append(_ansi(date_header, "37", bold=True))
-                lines.append("─" * 34)
-
-                for ev in day_map[d]:
-                    cat_key = ev.get("cat", "")
-                    code    = cat_ansi.get(cat_key, "37")
-                    cat_lbl = cat_labels.get(cat_key, cat_key)
-                    detail  = ev.get("detail", "")
-
-                    if ev.get("end_date") and ev["end_date"] != ev["date"]:
-                        ev_s = datetime.strptime(ev["date"], "%Y-%m-%d").date()
-                        ev_e = datetime.strptime(ev["end_date"], "%Y-%m-%d").date()
-                        if ev_s.month == ev_e.month:
-                            date_lbl = f"{ev_s.day}–{ev_e.day} {TH_MONTHS[ev_s.month]}"
-                        else:
-                            date_lbl = f"{ev_s.day} {TH_MONTHS[ev_s.month]} – {ev_e.day} {TH_MONTHS[ev_e.month]}"
-                    else:
-                        date_lbl = f"{d.day} {TH_MONTHS[d.month]}"
-
-                    lines.append(_ansi(f"  ●  {ev['name']}", code, bold=True))
-                    lines.append(_ansi(f"     {cat_lbl}  ·  {date_lbl}", code, dim=True))
-                    if detail:
-                        lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
-                lines.append("")
-
-            description = "```ansi\n" + "\n".join(lines) + "```"
-            if len(description) > 4000:
-                description = description[:3990] + "\n…```"
-
-            embed = discord.Embed(
-                title=(
-                    f"[TEST] 📋  กิจกรรม 14 วันข้างหน้า  —  "
-                    f"{today.day} {TH_MONTHS[today.month]} – "
-                    f"{end_date.day} {TH_MONTHS[end_date.month]} {today.year + 543}"
-                ),
-                description=description,
-                color=0x95A5A6,
-            )
-            embed.set_footer(text=f"[TEST] อัปเดตล่าสุด: {datetime.now(BANGKOK_TZ).strftime('%d/%m/%Y %H:%M')} น.")
             await test_channel.send(embed=embed)
-
         await interaction.followup.send("✅ ส่งไปช่องทดสอบแล้วครับ", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
@@ -2356,12 +2102,18 @@ async def help_command(interaction: discord.Interaction):
             "`/remove-event` — ลบกิจกรรม\n"
             "`/add-recurring` — เพิ่มกิจกรรมประจำ\n"
             "`/skip-event` — ข้ามกิจกรรมประจำ\n"
-            "`/post-resource` — โพสต์เอกสารโรงเรียน\n"
             "`/set-dress-schedule` — ตั้งชุดประจำวันในสัปดาห์\n"
             "`/set-dress` — ตั้งชุดวันพิเศษ\n"
             "`/post-dress` — โพสต์แจ้งเครื่องแต่งกายทันที"
         )
         embed.add_field(name="รายการ", value=admin_cmds, inline=False)
+
+        test_cmds = (
+            "`/test-dress` — ทดสอบโพสต์แจ้งเครื่องแต่งกายในช่องทดสอบ\n"
+            "`/test-calendar` — ทดสอบโพสต์ปฏิทินในช่องทดสอบ\n"
+            "`/test-agenda` — ทดสอบโพสต์ agenda ในช่องทดสอบ"
+        )
+        embed.add_field(name="🧪  คำสั่งทดสอบ", value=test_cmds, inline=False)
 
     embed.set_footer(text="บอทจะส่งแจ้งเตือนกิจกรรมทุกเช้า 06:00 น. อัตโนมัติ")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2404,8 +2156,11 @@ async def on_member_join(member: discord.Member):
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Catch unexpected slash-command errors and show a friendly message."""
-    print(f"[error] Command /{interaction.command.name if interaction.command else '?'}: {error}")
-    msg = "❌ เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง หากยังมีปัญหา แจ้ง Admin ได้เลยครับ"
+    if isinstance(error, app_commands.MissingRole):
+        msg = "คุณต้องมี role **Admin** จึงจะใช้คำสั่งนี้ได้"
+    else:
+        print(f"[error] Command /{interaction.command.name if interaction.command else '?'}: {error}")
+        msg = "❌ เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง หากยังมีปัญหา แจ้ง Admin ได้เลยครับ"
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
