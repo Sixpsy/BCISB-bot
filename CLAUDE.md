@@ -45,7 +45,14 @@ ssh -i ~/.ssh/id_ed25519_nas sixpsy@192.168.31.172 'cat > /volume1/docker/BCISB-
 
 # 2. Rebuild and restart
 ssh -i ~/.ssh/id_ed25519_nas sixpsy@192.168.31.172 "sudo /usr/local/bin/restart-bcisb-bot"
+
+# 3. Tail container logs (default 50 lines, optional arg to set count)
+ssh -i ~/.ssh/id_ed25519_nas sixpsy@192.168.31.172 "sudo /usr/local/bin/bcisb-bot-logs 200"
 ```
+
+Note: Python's stdout is buffered inside the container, so `print()` lines may not
+appear immediately. To get real-time output, add `PYTHONUNBUFFERED=1` to the
+`environment:` section of `docker-compose.yml` and redeploy.
 
 The JSON data files (`events.json`, `dresscode.json`, etc.) are mounted as Docker volumes — they survive rebuilds and must **never** be overwritten when pushing code.
 

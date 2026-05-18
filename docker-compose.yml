@@ -5,6 +5,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Flush print() output immediately so `docker logs` shows real-time activity
+      PYTHONUNBUFFERED: "1"
     volumes:
       # Mutable data files — mounted from the NAS folder so they survive rebuilds
       - ./events.json:/app/events.json
