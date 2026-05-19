@@ -127,12 +127,24 @@ tree   = app_commands.CommandTree(client)
 #  Calendar state: track posted message IDs
 # =============================================
 def save_json_atomic(path: Path, data) -> None:
-    """Write JSON to a sibling .tmp file then os.replace() so a crash mid-write
-    can never truncate the live file."""
+    """Write JSON safely. Tries the sibling-temp-file + rename pattern so a
+    crash mid-write can't truncate the live file. Falls back to a direct copy
+    when rename is rejected — which happens with Docker bind-mount-by-file
+    volumes (used in production for events.json / reminders.json etc.) where
+    the destination inode is pinned and `os.replace` raises EBUSY."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # Bind-mounted destination: copy contents into the existing inode.
+        import shutil
+        shutil.copyfile(tmp, path)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 def load_state() -> dict:
     if STATE_FILE.exists():
