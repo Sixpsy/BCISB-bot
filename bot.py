@@ -864,20 +864,15 @@ class DateSelectionView(discord.ui.View):
 
 
 # =============================================
-#  Reminder Type 1: Daily channel embed at 06:00 UTC+7
-#  (runs at 23:00 UTC every night = 06:00 next morning Bangkok time)
+#  Daily events embed: list of today's events for the calendar channel.
+#  Posted underneath the daily calendar refresh on school days.
 # =============================================
-@tasks.loop(time=dtime(hour=23, minute=0, tzinfo=timezone.utc))
-async def daily_channel_reminder():
-    """At 06:00 UTC+7, post a rich embed for any non-holiday events that day."""
-    today_bkk = datetime.now(BANGKOK_TZ).date()
-    today_str  = today_bkk.strftime("%Y-%m-%d")
+def build_daily_events_embed(today_bkk: date):
+    """Build the "@everyone" today's-events embed for the calendar channel.
 
-    # Skip entirely if today is a holiday or weekend (with no overriding school event)
-    is_hol, _ = is_holiday_or_weekend(today_bkk)
-    if is_hol:
-        print(f"[daily_reminder] Skipping — today ({today_bkk}) is a holiday/weekend")
-        return
+    Returns (content_text, discord.Embed) — or None when today has no
+    actionable (non-holiday) events to surface."""
+    today_str = today_bkk.strftime("%Y-%m-%d")
 
     events = load_events(EVENTS_FILE)
     today_events = [
@@ -894,19 +889,13 @@ async def daily_channel_reminder():
 
     # Filter out holiday-category events — only post actionable school events
     today_events = [e for e in today_events if e.get("cat", "") != "holiday"]
-
     if not today_events:
-        return
-
-    channel = client.get_channel(CHANNEL_ID)
-    if not channel:
-        return
+        return None
 
     th_month   = TH_MONTHS[today_bkk.month]
     cat_labels = load_cat_labels()
     cat_ansi   = load_cat_ansi()
 
-    # Build one ANSI code-block with breathing room between events.
     desc_lines: list[str] = []
     for ev in today_events:
         cat_key = ev.get("cat", "")
@@ -926,7 +915,7 @@ async def daily_channel_reminder():
         desc_lines.append(_ansi(f"     {cat_lbl}  ·  {date_label}", code, dim=True))
         if detail:
             desc_lines.append(_ansi(f"     ↳  {detail}", code, dim=True))
-        desc_lines.append("")   # blank line = breathing room between events
+        desc_lines.append("")
 
     embed = discord.Embed(
         title=f"📅  กิจกรรมวันนี้  —  {today_bkk.day} {th_month} {today_bkk.year + 543}",
@@ -934,14 +923,8 @@ async def daily_channel_reminder():
         color=cat_color_int(today_events[0].get("cat", "")),
     )
     embed.set_footer(text="ข้อความนี้จะถูกลบอัตโนมัติเมื่อสิ้นสุดวัน")
+    return "@everyone", embed
 
-    msg = await channel.send("@everyone", embed=embed)
-    print(f"[daily_reminder] Posted embed for {len(today_events)} event(s) on {today_bkk}")
-
-    # Store the message ID so the end-of-day cleanup task can delete it
-    state = load_state()
-    state["daily_reminder_msg"] = {"message_id": msg.id, "channel_id": channel.id, "date": today_str}
-    save_state(state)
 
 
 # =============================================
@@ -1040,18 +1023,70 @@ async def check_dm_reminders():
 
 
 # =============================================
-#  Auto-post calendar on the 1st of each month
+#  Daily auto-post: re-render calendar + (on school days) today's events embed.
+#  School day  -> 06:00 BKK (23:00 UTC)
+#  Real holiday-> 09:00 BKK (02:00 UTC)
 # =============================================
-@tasks.loop(time=dtime(hour=23, minute=5, tzinfo=timezone.utc))
-async def monthly_calendar():
-    """At 06:05 UTC+7 on the 1st, auto-post the monthly calendar."""
-    now = datetime.now(BANGKOK_TZ).date()
-    if now.day != 1:
-        return
-    await post_two_month_calendar(now.year, now.month)
+async def post_daily_calendar(today: date) -> None:
+    """Re-render the 2-month calendar and (on school days) append the today's-events embed.
+
+    `post_two_month_calendar` purges the channel before posting so the calendar
+    image is always the top message. The events embed is sent right after and
+    its message id is stored for end-of-day cleanup."""
+    await post_two_month_calendar(today.year, today.month)
+
+    is_hol, _ = is_holiday_or_weekend(today)
+    if not is_hol:
+        reminder = build_daily_events_embed(today)
+        if reminder is not None:
+            text, embed = reminder
+            channel = client.get_channel(CHANNEL_ID)
+            if not channel:
+                try:
+                    channel = await client.fetch_channel(CHANNEL_ID)
+                except Exception as e:
+                    print(f"[daily_calendar] Cannot find channel {CHANNEL_ID}: {e}")
+                    channel = None
+            if channel is not None:
+                msg = await channel.send(text, embed=embed)
+                state = load_state()
+                state["daily_reminder_msg"] = {
+                    "message_id": msg.id,
+                    "channel_id": channel.id,
+                    "date": today.strftime("%Y-%m-%d"),
+                }
+                save_state(state)
+                print(f"[daily_calendar] Posted events embed for {today}")
+
     state = load_state()
-    state["last_calendar_month"] = f"{now.year}-{now.month}"
+    state["last_calendar_post"] = today.strftime("%Y-%m-%d")
     save_state(state)
+
+
+@tasks.loop(time=dtime(hour=23, minute=0, tzinfo=timezone.utc))
+async def daily_calendar_school():
+    """06:00 BKK — daily calendar refresh on school days only."""
+    today = datetime.now(BANGKOK_TZ).date()
+    if load_state().get("last_calendar_post") == today.strftime("%Y-%m-%d"):
+        print(f"[daily_calendar] Already posted for {today}, skipping school slot")
+        return
+    is_hol, _ = is_holiday_or_weekend(today)
+    if is_hol:
+        return
+    await post_daily_calendar(today)
+
+
+@tasks.loop(time=dtime(hour=2, minute=0, tzinfo=timezone.utc))
+async def daily_calendar_holiday():
+    """09:00 BKK — daily calendar refresh on real holidays only."""
+    today = datetime.now(BANGKOK_TZ).date()
+    if load_state().get("last_calendar_post") == today.strftime("%Y-%m-%d"):
+        print(f"[daily_calendar] Already posted for {today}, skipping holiday slot")
+        return
+    is_hol, _ = is_holiday_or_weekend(today)
+    if not is_hol:
+        return
+    await post_daily_calendar(today)
 
 
 # =============================================
@@ -2191,23 +2226,20 @@ async def on_ready():
         synced = await tree.sync()
         print(f"Synced {len(synced)} command(s) globally")
 
-    for loop in (monthly_calendar, daily_channel_reminder, delete_daily_reminder,
-                 check_dm_reminders, daily_dress_reminder):
+    for loop in (daily_calendar_school, daily_calendar_holiday,
+                 delete_daily_reminder, check_dm_reminders, daily_dress_reminder):
         if not loop.is_running():
             loop.start()
 
-    # Catch-up: post monthly calendar if the bot was offline on the 1st
+    # Catch-up: if we missed today's auto-post window (or it's the first run
+    # after rolling over midnight Bangkok time), post immediately.
     now_bkk = datetime.now(BANGKOK_TZ).date()
-    state = load_state()
-    last_posted = state.get("last_calendar_month")
-    current_key = f"{now_bkk.year}-{now_bkk.month}"
-    if last_posted != current_key:
+    today_key = now_bkk.strftime("%Y-%m-%d")
+    last_post = load_state().get("last_calendar_post")
+    if last_post != today_key:
         try:
-            await post_two_month_calendar(now_bkk.year, now_bkk.month)
-            state = load_state()
-            state["last_calendar_month"] = current_key
-            save_state(state)
-            print(f"[on_ready] Catch-up calendar posted for {current_key}")
+            await post_daily_calendar(now_bkk)
+            print(f"[on_ready] Catch-up calendar posted for {today_key}")
         except Exception as e:
             print(f"[on_ready] Catch-up calendar failed: {e}")
 

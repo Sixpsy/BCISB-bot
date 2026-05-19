@@ -81,11 +81,15 @@ Everything lives in two Python files:
 
 | Task | Schedule | Action |
 |---|---|---|
-| `daily_channel_reminder` | 06:00 | Post `@everyone` embed of today's events (includes multi-day events whose range covers today) |
-| `delete_daily_reminder` | 00:00 | Delete the morning reminder from the previous day |
+| `daily_calendar_school` | 06:00 | Re-render the 2-month calendar AND post `@everyone` today's-events embed below it. Skips if today is a real holiday/weekend. |
+| `daily_calendar_holiday` | 09:00 | Re-render the 2-month calendar. Skips if today is a school day (incl. holiday dates with a non-holiday event — `daily_calendar_school` covers those). |
+| `delete_daily_reminder` | 00:00 | Delete yesterday's events embed from the calendar channel |
 | `daily_dress_reminder` | 06:02 | Post today's + tomorrow's dress code |
-| `monthly_calendar` | 06:05, 1st of month | Auto-post full calendar image |
 | `check_dm_reminders` | Every 5 min | Poll `reminders.json` and DM users when `remind_at` is due |
+
+Both `daily_calendar_*` loops share a `state["last_calendar_post"] = "YYYY-MM-DD"`
+idempotency key, and `on_ready` runs a catch-up post if that key is older than
+today's BKK date (covers restarts after a missed window).
 
 ### Holiday detection
 

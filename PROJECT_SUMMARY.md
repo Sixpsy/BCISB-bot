@@ -44,9 +44,9 @@ A Discord bot for parent communication in a school class. It displays an event c
 - ANSI-colored event list with category labels and details
 
 **Daily Automation**
-- **Daily calendar reminder** (06:00 UTC+7): Posts `@everyone` embed listing today's events (including any multi-day event whose range covers today). Skips holidays and weekends. Auto-deleted at midnight.
+- **Daily calendar refresh — school days** (06:00 UTC+7): Re-renders the 2-month calendar image and posts it. On school days also appends an `@everyone` embed listing today's events (multi-day aware). The events embed is auto-deleted at midnight.
+- **Daily calendar refresh — holidays** (09:00 UTC+7): Re-renders the calendar on real holidays/weekends (no events embed). A holiday date that has a non-holiday event scheduled is treated as a school day and is handled by the 06:00 slot instead.
 - **Daily dress code** (06:02 UTC+7): Posts today's and tomorrow's dress code. Skips holidays and weekends. Shows upcoming special dress days.
-- **Monthly auto-post** (06:05 UTC+7 on the 1st): Posts the 2-month calendar.
 - **DM reminder checker**: Runs every 5 minutes, sends DMs when reminder time arrives.
 
 **Reminder System**
