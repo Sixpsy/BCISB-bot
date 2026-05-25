@@ -428,7 +428,7 @@ async def _post_dress_code_inner(target_date: date = None):
     except Exception as e:
         print(f"[dress] Old-message sweep failed: {e}")
 
-    print(f"[dress] Posted dress code — today={today} / tomorrow={tomorrow} / specials={len(specials)}")
+    print(f"[dress] Posted dress code for {today}")
 
 
 # ---- Text cleaning ----
