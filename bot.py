@@ -935,7 +935,16 @@ def build_daily_events_embed(today_bkk: date):
         color=cat_color_int(today_events[0].get("cat", "")),
     )
     embed.set_footer(text="ข้อความนี้จะถูกลบอัตโนมัติเมื่อสิ้นสุดวัน")
-    return "@everyone", embed
+
+    # Only ping @everyone on the first or last day of an event. Single-day events
+    # have date == today; multi-day boundary days have date == today (start) or
+    # end_date == today (end). Middle days of a multi-day event still appear in
+    # the embed but post silently.
+    ping = any(
+        ev["date"] == today_str or ev.get("end_date") == today_str
+        for ev in today_events
+    )
+    return ("@everyone" if ping else None), embed
 
 
 
