@@ -1226,6 +1226,8 @@ async def show_calendar(
     cat="หมวดหมู่ (เลือกจากรายการ)",
     name="ชื่อกิจกรรม",
     detail="รายละเอียดเพิ่มเติม (ไม่บังคับ)",
+    dress="ชุดแต่งกายสำหรับวันกิจกรรม (ไม่บังคับ) — จะตั้งเป็น override ของวันนั้นๆ",
+    dress_note="หมายเหตุของชุด (ไม่บังคับ — ค่าเริ่มต้นใช้ชื่อกิจกรรม)",
 )
 @app_commands.autocomplete(cat=category_autocomplete)
 @app_commands.checks.has_role("Admin")
@@ -1236,6 +1238,8 @@ async def add_event(
     name: str,
     end_date_str: str = None,
     detail: str = None,
+    dress: str = None,
+    dress_note: str = None,
 ):
     try:
         start_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -1274,12 +1278,30 @@ async def add_event(
     events.append(event)
     save_events(events)
 
+    # Optional: write dress-code overrides for every day in the event's range.
+    # Matches /set-dress behavior — overwrites silently on conflict.
+    dress_clean = dress.strip() if dress and dress.strip() else None
+    if dress_clean:
+        note_clean = dress_note.strip() if dress_note and dress_note.strip() else name.strip()
+        dc = load_dresscode()
+        overrides = dc.setdefault("overrides", {})
+        range_end = end_date.date() if end_date_str else start_date.date()
+        d = start_date.date()
+        while d <= range_end:
+            entry = {"dress": dress_clean}
+            if note_clean:
+                entry["note"] = note_clean
+            overrides[d.strftime("%Y-%m-%d")] = entry
+            d += timedelta(days=1)
+        save_dresscode(dc)
+
     date_label = f"{date_str} ถึง {end_date_str}" if end_date_str else date_str
     detail_note = f"\n   _{detail.strip()}_" if detail and detail.strip() else ""
+    dress_msg = f"\n   👗 ตั้งชุด: **{dress_clean}**" if dress_clean else ""
     try:
         await post_two_month_calendar()
         await interaction.followup.send(
-            f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}",
+            f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}{dress_msg}",
             ephemeral=True,
         )
     except Exception as e:
