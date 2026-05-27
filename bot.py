@@ -826,10 +826,6 @@ class AddEventModal(discord.ui.Modal):
             )
             return
 
-        # Defer immediately — post_two_month_calendar takes seconds (Playwright render)
-        # and would exceed Discord's 3-second modal response window.
-        await interaction.response.defer(ephemeral=True)
-
         date_str = self.detected_date.strftime("%Y-%m-%d")
         name     = self.event_name.value.strip()
         detail   = self.detail.value.strip() if self.detail.value else ""
@@ -841,10 +837,9 @@ class AddEventModal(discord.ui.Modal):
         events.append(event)
         save_events(events)
 
-        await post_two_month_calendar()
         th_month = TH_MONTHS[self.detected_date.month]
         detail_note = f"\n   _{detail}_" if detail else ""
-        await interaction.followup.send(
+        await interaction.response.send_message(
             f"✅ เพิ่ม **{name}** ({self.detected_date.day} {th_month} "
             f"{self.detected_date.year + 543}) ลงปฏิทินแล้ว{detail_note}",
             ephemeral=True,
@@ -1298,14 +1293,10 @@ async def add_event(
     date_label = f"{date_str} ถึง {end_date_str}" if end_date_str else date_str
     detail_note = f"\n   _{detail.strip()}_" if detail and detail.strip() else ""
     dress_msg = f"\n   👗 ตั้งชุด: **{dress_clean}**" if dress_clean else ""
-    try:
-        await post_two_month_calendar()
-        await interaction.followup.send(
-            f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}{dress_msg}",
-            ephemeral=True,
-        )
-    except Exception as e:
-        await interaction.followup.send(f"❌ บันทึกกิจกรรมแล้ว แต่อัปเดตปฏิทินไม่สำเร็จ: {e}", ephemeral=True)
+    await interaction.followup.send(
+        f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}{dress_msg}",
+        ephemeral=True,
+    )
 
 
 # =============================================
@@ -1390,11 +1381,7 @@ async def remove_event(
             "กรุณาเลือกกิจกรรมจากรายการ autocomplete", ephemeral=True)
         return
 
-    try:
-        await post_two_month_calendar()
-        await interaction.followup.send(remove_desc, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ ลบแล้ว แต่อัปเดตปฏิทินไม่สำเร็จ: {e}", ephemeral=True)
+    await interaction.followup.send(remove_desc, ephemeral=True)
 
 
 # =============================================
@@ -1487,14 +1474,10 @@ async def add_recurring(
 
     freq_label = "ทุกสัปดาห์" if frequency.value == "weekly" else "ทุก 2 สัปดาห์"
     wd_label   = TH_WEEKDAYS[int(weekday.value)]
-    try:
-        await post_two_month_calendar()
-        await interaction.followup.send(
-            f"✅ เพิ่มกิจกรรมประจำ **{name}** ({freq_label} วัน{wd_label}) เริ่ม {start_date} แล้วครับ",
-            ephemeral=True,
-        )
-    except Exception as e:
-        await interaction.followup.send(f"❌ บันทึกแล้ว แต่อัปเดตปฏิทินไม่สำเร็จ: {e}", ephemeral=True)
+    await interaction.followup.send(
+        f"✅ เพิ่มกิจกรรมประจำ **{name}** ({freq_label} วัน{wd_label}) เริ่ม {start_date} แล้วครับ",
+        ephemeral=True,
+    )
 
 
 # =============================================
@@ -1553,18 +1536,13 @@ async def skip_event(
             f"วันที่ {date_str} ถูกข้ามไปแล้ว", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
     rec.setdefault("excluded_dates", []).append(date_str)
     save_recurring(recurring)
 
-    try:
-        await post_two_month_calendar()
-        await interaction.followup.send(
-            f"⏭️ ข้ามกิจกรรม **{rec['name']}** วันที่ {date_str} แล้วครับ",
-            ephemeral=True,
-        )
-    except Exception as e:
-        await interaction.followup.send(f"❌ บันทึกแล้ว แต่อัปเดตปฏิทินไม่สำเร็จ: {e}", ephemeral=True)
+    await interaction.response.send_message(
+        f"⏭️ ข้ามกิจกรรม **{rec['name']}** วันที่ {date_str} แล้วครับ",
+        ephemeral=True,
+    )
 
 
 # =============================================
