@@ -263,7 +263,10 @@ def get_dress_for_date(d: date) -> dict | None:
 def get_events_for_date(d: date) -> list:
     """Return one-off and recurring events for a specific date."""
     date_str = d.strftime("%Y-%m-%d")
-    one_off = [e for e in load_events(EVENTS_FILE) if e.get("date") == date_str]
+    one_off = [
+        e for e in load_events(EVENTS_FILE)
+        if e.get("date") and e["date"] <= date_str <= e.get("end_date", e["date"])
+    ]
     recurring_on_day = []
     for rec in load_recurring():
         for ev in expand_recurring_for_month(rec, d.year, d.month):
