@@ -2255,17 +2255,25 @@ async def on_ready():
         if not loop.is_running():
             loop.start()
 
-    # Catch-up: if we missed today's auto-post window (or it's the first run
-    # after rolling over midnight Bangkok time), post immediately.
-    now_bkk = datetime.now(BANGKOK_TZ).date()
-    today_key = now_bkk.strftime("%Y-%m-%d")
+    # Catch-up: if we missed today's auto-post window, post immediately.
+    # Only fires AFTER today's slot time has passed — a restart between
+    # midnight and the slot must wait for the scheduled loop (else we'd
+    # ping the channel in the middle of the night).
+    now_bkk = datetime.now(BANGKOK_TZ)
+    today = now_bkk.date()
+    today_key = today.strftime("%Y-%m-%d")
     last_post = load_state().get("last_calendar_post")
     if last_post != today_key:
-        try:
-            await post_daily_calendar(now_bkk)
-            print(f"[on_ready] Catch-up calendar posted for {today_key}")
-        except Exception as e:
-            print(f"[on_ready] Catch-up calendar failed: {e}")
+        is_hol, _ = is_holiday_or_weekend(today)
+        slot = dtime(hour=9) if is_hol else dtime(hour=6)
+        if now_bkk.time() >= slot:
+            try:
+                await post_daily_calendar(today)
+                print(f"[on_ready] Catch-up calendar posted for {today_key}")
+            except Exception as e:
+                print(f"[on_ready] Catch-up calendar failed: {e}")
+        else:
+            print(f"[on_ready] Before today's {slot:%H:%M} slot — leaving post to scheduled loop")
 
 
 # ---- Run ----
