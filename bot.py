@@ -15,6 +15,7 @@ from calendar_render import (
     generate_two_month_image,
     load_events, TH_MONTHS, next_month,
 )
+import powerschool
 
 # Optional deps — bot works without them but OCR/PDF won't extract text
 try:
@@ -115,6 +116,20 @@ DRESSCODE_FILE   = BASE_DIR / "dresscode.json"
 # Private test channel (not visible to parents) — admin /test-* commands post here
 TEST_CHANNEL_ID = int(os.getenv("TEST_CHANNEL_ID", "1503578584961515691"))
 
+# PowerSchool relay — homeroom-teacher messages into a private channel.
+# Set POWERSCHOOL_CHANNEL_ID / POWERSCHOOL_USER / POWERSCHOOL_PASS in .env.
+_ps_id = os.getenv("POWERSCHOOL_CHANNEL_ID")
+POWERSCHOOL_CHANNEL_ID = int(_ps_id) if _ps_id else None
+# Matched case-insensitively against a message's author field.
+PS_TEACHER    = os.getenv("POWERSCHOOL_TEACHER", "Randy")
+PS_STATE_FILE = BASE_DIR / "powerschool_state.json"
+# Keep the de-dup list bounded; far more than a school year of messages.
+PS_SEEN_CAP = 500
+# First run has no "seen" history, so the whole backlog would look new. Post
+# only the newest few and silently mark the rest seen, so enabling the feature
+# doesn't dump a term's worth of messages into the channel at once.
+PS_FIRST_RUN_LIMIT = 3
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True          # Required for on_member_join welcome DM
@@ -172,6 +187,15 @@ def load_reminders() -> list:
 
 def save_reminders(reminders: list):
     save_json_atomic(REMINDERS_FILE, reminders)
+
+def load_ps_state() -> dict:
+    if PS_STATE_FILE.exists():
+        with open(PS_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_ps_state(state: dict):
+    save_json_atomic(PS_STATE_FILE, state)
 
 def save_events(events: list):
     """Atomic write for events.json (one-off events)."""
@@ -541,7 +565,7 @@ def extract_dates_from_text(text: str, ref_year: int = None) -> list:
     (date, context_snippet) tuples, skipping dates already in the past.
     """
     if not ref_year:
-        ref_year = date.today().year
+        ref_year = datetime.now(BANGKOK_TZ).date().year
 
     # Matches "March 25th, 2026", "April 27th 2026", "June 19th" etc.
     pattern = re.compile(
@@ -564,7 +588,7 @@ def extract_dates_from_text(text: str, ref_year: int = None) -> list:
             d = date(year, month, day)
         except ValueError:
             continue
-        if d in seen or d < date.today():
+        if d in seen or d < datetime.now(BANGKOK_TZ).date():
             continue
         seen.add(d)
         # Grab ~80 chars of surrounding context, collapsed to one line
@@ -950,34 +974,52 @@ def build_daily_events_embed(today_bkk: date):
 #  Reminder Type 1b: Delete daily reminder at midnight Bangkok time
 #  (runs at 17:00 UTC = 00:00 Bangkok time)
 # =============================================
+async def _delete_reminder_message(info: dict) -> None:
+    """Delete one stored events-embed message. Tolerates an already-deleted one."""
+    channel = client.get_channel(info["channel_id"])
+    if not channel:
+        try:
+            channel = await client.fetch_channel(info["channel_id"])
+        except Exception as e:
+            print(f"[daily_reminder] Cannot find channel {info['channel_id']}: {e}")
+            return
+
+    try:
+        msg = await channel.fetch_message(info["message_id"])
+        await msg.delete()
+        print(f"[daily_reminder] Deleted events embed {info['message_id']} "
+              f"from {info.get('date')}")
+    except discord.NotFound:
+        print(f"[daily_reminder] Events embed {info['message_id']} already deleted")
+    except Exception as e:
+        print(f"[daily_reminder] Could not delete events embed {info['message_id']}: {e}")
+
+
 @tasks.loop(time=dtime(hour=17, minute=0, tzinfo=timezone.utc))
 async def delete_daily_reminder():
-    """At midnight UTC+7, delete the morning daily reminder message to keep the channel clean."""
+    """At 00:00 BKK, delete the day-just-ended events embed to keep the channel clean.
+
+    The loop fires at 17:00 UTC, which is already 00:00 of the *next* Bangkok
+    day, so the stored embed is by definition stamped with the day that just
+    ended — the date must NOT match today's BKK date for a delete to happen.
+    A message already stamped with the new BKK date is left alone (it would
+    have to have been posted after midnight, and it still has its day to run);
+    that branch deliberately leaves the state key in place so tomorrow's
+    midnight run can still find it."""
     state = load_state()
     info  = state.get("daily_reminder_msg")
     if not info:
         return
 
     today_str = datetime.now(BANGKOK_TZ).date().strftime("%Y-%m-%d")
-    if info.get("date") != today_str:
-        state.pop("daily_reminder_msg", None)
-        save_state(state)
+    if info.get("date") == today_str:
+        print(f"[daily_reminder] Events embed already stamped {today_str} — keeping it")
         return
 
-    channel = client.get_channel(info["channel_id"])
-    if not channel:
-        return
-
-    try:
-        msg = await channel.fetch_message(info["message_id"])
-        await msg.delete()
-        print(f"[daily_reminder] Deleted end-of-day reminder message {info['message_id']}")
-    except discord.NotFound:
-        print(f"[daily_reminder] Reminder message {info['message_id']} already deleted")
-    except Exception as e:
-        print(f"[daily_reminder] Could not delete reminder message: {e}")
-    finally:
-        # Clear the stored ID regardless of outcome
+    await _delete_reminder_message(info)
+    # Re-read: the delete awaited, and post_daily_calendar may have written since.
+    state = load_state()
+    if state.get("daily_reminder_msg", {}).get("message_id") == info["message_id"]:
         state.pop("daily_reminder_msg", None)
         save_state(state)
 
@@ -1049,9 +1091,10 @@ async def check_dm_reminders():
 async def post_daily_calendar(today: date) -> None:
     """Re-render the 2-month calendar and (on school days) append the today's-events embed.
 
-    `post_two_month_calendar` purges the channel before posting so the calendar
-    image is always the top message. The events embed is sent right after and
-    its message id is stored for end-of-day cleanup."""
+    `post_two_month_calendar` edits the existing calendar message in place and
+    only purges the channel on its repost fallback, so it does NOT clean up the
+    previous day's events embed. That embed is removed by `delete_daily_reminder`
+    at midnight, with a self-heal below for the case where that run was missed."""
     await post_two_month_calendar(today.year, today.month)
 
     is_hol, _ = is_holiday_or_weekend(today)
@@ -1067,6 +1110,13 @@ async def post_daily_calendar(today: date) -> None:
                     print(f"[daily_calendar] Cannot find channel {CHANNEL_ID}: {e}")
                     channel = None
             if channel is not None:
+                # Self-heal: if the midnight cleanup never ran (bot down, delete
+                # failed), the previous day's embed is still live — and the write
+                # below is about to overwrite the only record of it. Remove it now.
+                stale = load_state().get("daily_reminder_msg")
+                if stale and stale.get("date") != today.strftime("%Y-%m-%d"):
+                    await _delete_reminder_message(stale)
+
                 msg = await channel.send(text, embed=embed)
                 state = load_state()
                 state["daily_reminder_msg"] = {
@@ -1122,6 +1172,159 @@ async def daily_dress_reminder():
     await post_dress_code(today_bkk)
 
 
+# =============================================
+#  PowerSchool relay: homeroom-teacher messages -> private channel
+#  Checked daily at 18:00 UTC+7 (11:00 UTC).
+# =============================================
+def _fmt_posted_at(raw: str) -> str:
+    """Human-readable Thai label for a PowerSchool timestamp.
+
+    Display only. The raw value is hashed into `powerschool.message_id()`, so
+    the stored string must never be reformatted — doing so changes every id and
+    re-relays the whole backlog. `_compose_posted_at` is best-effort and can
+    hand back a full ISO stamp, a bare date (time unparsed), or the portal's
+    own label, so all three are handled."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    # Date-only must be checked first: fromisoformat("2026-08-24") happily
+    # returns midnight, which would render a "00:00 น." the portal never said.
+    if "T" not in raw:
+        try:
+            return fmt_thai_date(date.fromisoformat(raw))
+        except ValueError:
+            return raw
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    return f"{fmt_thai_date(dt.date())} {dt:%H:%M} น."
+
+
+def build_powerschool_embed(msg: dict) -> discord.Embed:
+    """One embed per teacher message. Body is relayed verbatim."""
+    body = (msg.get("body") or "").strip()
+    # Discord caps an embed description at 4096 characters.
+    if len(body) > 4000:
+        body = body[:4000] + "\n\n… (ตัดข้อความ — ดูฉบับเต็มใน PowerSchool)"
+
+    embed = discord.Embed(
+        title=(msg.get("subject") or "ข้อความจากครู")[:256],
+        description=body or "_(ไม่มีเนื้อหา)_",
+        color=0x0F6CBD,          # PowerSchool blue
+        url=msg.get("url") or None,
+    )
+    author = (msg.get("author") or "").strip()
+    if author:
+        embed.set_author(name=author[:256])
+    posted_at = _fmt_posted_at(msg.get("posted_at"))
+    embed.set_footer(text=f"PowerSchool · {posted_at}" if posted_at else "PowerSchool")
+    return embed
+
+
+async def check_powerschool() -> tuple[int, str]:
+    """Poll PowerSchool and post unseen teacher messages.
+
+    Returns (number_posted, error_message). An empty error string means the
+    check itself succeeded — posting zero messages is the normal case."""
+    if not POWERSCHOOL_CHANNEL_ID:
+        return 0, "POWERSCHOOL_CHANNEL_ID not set in .env"
+
+    channel = client.get_channel(POWERSCHOOL_CHANNEL_ID)
+    if not channel:
+        try:
+            channel = await client.fetch_channel(POWERSCHOOL_CHANNEL_ID)
+        except Exception as e:
+            return 0, f"ไม่พบช่อง PowerSchool (ID: {POWERSCHOOL_CHANNEL_ID}): {e}"
+
+    messages = await powerschool.fetch_teacher_messages(PS_TEACHER)
+    messages = [m for m in messages if powerschool.matches_teacher(m, PS_TEACHER)]
+
+    state    = load_ps_state()
+    # "seeded" is set only after a fetch has actually returned messages. Keying
+    # off the presence of "seen" instead would let an EMPTY first scrape (slow
+    # render, collapsed accordion, changed selector) record a baseline of
+    # nothing — and then the entire backlog would flood the channel the first
+    # time the scrape worked, which is exactly what PS_FIRST_RUN_LIMIT exists
+    # to prevent.
+    seeded   = bool(state.get("seeded"))
+    seen     = list(state.get("seen", []))
+    seen_set = set(seen)
+
+    fresh = [m for m in messages if powerschool.message_id(m) not in seen_set]
+    if not seeded and len(fresh) > PS_FIRST_RUN_LIMIT:
+        # fetch_teacher_messages returns newest last, so the tail is newest.
+        skipped = fresh[:-PS_FIRST_RUN_LIMIT]
+        for m in skipped:
+            seen.append(powerschool.message_id(m))
+        fresh = fresh[-PS_FIRST_RUN_LIMIT:]
+        print(f"[powerschool] First run — marked {len(skipped)} older message(s) "
+              f"as seen without posting")
+
+    posted = 0
+    for msg in fresh:
+        try:
+            await channel.send(embed=build_powerschool_embed(msg))
+        except Exception as e:
+            # Stop on send failure rather than marking unposted messages seen.
+            save_ps_state({**state, "seen": seen[-PS_SEEN_CAP:]})
+            return posted, f"ส่งข้อความไม่สำเร็จ: {e}"
+        seen.append(powerschool.message_id(msg))
+        posted += 1
+
+    if messages:
+        state["seeded"] = True
+    state["seen"]       = seen[-PS_SEEN_CAP:]
+    state["last_check"] = datetime.now(BANGKOK_TZ).isoformat(timespec="seconds")
+    save_ps_state(state)
+    return posted, ""
+
+
+@tasks.loop(time=dtime(hour=11, minute=0, tzinfo=timezone.utc))
+async def daily_powerschool_check():
+    """18:00 BKK — relay any new messages from the homeroom teacher.
+
+    Every failure is swallowed and logged: an unhandled exception inside a
+    tasks.loop kills the loop for the life of the process."""
+    if not POWERSCHOOL_CHANNEL_ID:
+        return
+    try:
+        posted, err = await check_powerschool()
+        if err:
+            print(f"[powerschool] {err}")
+        else:
+            print(f"[powerschool] Checked — posted {posted} new message(s)")
+    except NotImplementedError as e:
+        print(f"[powerschool] Parser not implemented yet: {e}")
+    except Exception as e:
+        print(f"[powerschool] Check failed: {e}")
+
+
+@tree.command(
+    name="check-powerschool",
+    description="ตรวจข้อความจากครูใน PowerSchool ทันที (Admin เท่านั้น)",
+)
+@app_commands.checks.has_role("Admin")
+async def check_powerschool_cmd(interaction: discord.Interaction):
+    # Playwright login + scrape takes seconds, well past Discord's 3s window.
+    await interaction.response.defer(ephemeral=True)
+    try:
+        posted, err = await check_powerschool()
+    except NotImplementedError as e:
+        await interaction.followup.send(
+            f"⚠️ ยังไม่ได้ตั้งค่าตัวอ่านข้อความ PowerSchool: {e}", ephemeral=True)
+        return
+    except Exception as e:
+        await interaction.followup.send(f"❌ ตรวจไม่สำเร็จ: {e}", ephemeral=True)
+        return
+
+    if err:
+        await interaction.followup.send(f"❌ {err}", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            f"✅ ตรวจแล้ว — โพสต์ข้อความใหม่ {posted} รายการ", ephemeral=True)
+
+
 async def build_two_month_calendar(year: int, month: int, test_mode: bool = False):
     """Render two-month calendar image + return (embed, discord.File).
     Used by post_two_month_calendar (live) and /test-calendar (test channel)."""
@@ -1158,7 +1361,13 @@ async def build_two_month_calendar(year: int, month: int, test_mode: bool = Fals
 
 
 async def post_two_month_calendar(year: int = None, month: int = None):
-    """Render the 2-month calendar and replace the calendar channel's contents."""
+    """Render the 2-month calendar and refresh the calendar channel's message.
+
+    Edits the previously-posted calendar message in place (swapping the image
+    attachment and embed) so daily refreshes — e.g. just to move the "today"
+    highlight on a holiday — don't create a new message/notification. Falls
+    back to purging the channel and sending fresh if there's no existing
+    message to edit (first run) or it can no longer be found/edited."""
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
         try:
@@ -1172,8 +1381,25 @@ async def post_two_month_calendar(year: int = None, month: int = None):
     month = month or today.month
     embed, file = await build_two_month_calendar(year, month)
 
+    state = load_state()
+    msg_info = state.get("calendar_msg")
+    if msg_info and msg_info.get("channel_id") == channel.id:
+        try:
+            old_msg = await channel.fetch_message(msg_info["message_id"])
+            await old_msg.edit(embed=embed, attachments=[file])
+            print(f"[calendar] Edited existing 2-month calendar msg {old_msg.id} "
+                  f"for {TH_MONTHS[month]} {year + 543}")
+            return
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            print(f"[calendar] Could not edit existing calendar msg, reposting: {e}")
+
     await clear_channel_messages(channel)
     msg = await channel.send(file=file, embed=embed)
+    state["calendar_msg"] = {"channel_id": channel.id, "message_id": msg.id}
+    # The purge above also removed today's events embed, so its stored id is
+    # dangling — drop it so delete_daily_reminder doesn't chase a dead message.
+    state.pop("daily_reminder_msg", None)
+    save_state(state)
     print(f"[calendar] Posted 2-month calendar starting {TH_MONTHS[month]} {year + 543} → msg {msg.id}")
 
 
@@ -1296,10 +1522,20 @@ async def add_event(
     date_label = f"{date_str} ถึง {end_date_str}" if end_date_str else date_str
     detail_note = f"\n   _{detail.strip()}_" if detail and detail.strip() else ""
     dress_msg = f"\n   👗 ตั้งชุด: **{dress_clean}**" if dress_clean else ""
-    await interaction.followup.send(
-        f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}{dress_msg}",
-        ephemeral=True,
-    )
+    # Refresh the channel calendar so the new event shows immediately.
+    # post_two_month_calendar edits the existing message in place, so this
+    # costs a render but adds no new message/notification.
+    try:
+        await post_two_month_calendar()
+        await interaction.followup.send(
+            f"✅ เพิ่มกิจกรรม **{name}** วันที่ {date_label} แล้วครับ{detail_note}{dress_msg}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ บันทึกกิจกรรมแล้ว แต่อัปเดตปฏิทินไม่สำเร็จ: {e}",
+            ephemeral=True,
+        )
 
 
 # =============================================
@@ -1437,7 +1673,7 @@ async def add_recurring(
             f"หมวดหมู่ไม่ถูกต้อง ใช้ได้: {valid}", ephemeral=True)
         return
 
-    today = date.today()
+    today = datetime.now(BANGKOK_TZ).date()
     if start_date:
         try:
             datetime.strptime(start_date, "%Y-%m-%d")
@@ -2163,7 +2399,8 @@ async def help_command(interaction: discord.Interaction):
             "`/skip-event` — ข้ามกิจกรรมประจำ\n"
             "`/set-dress-schedule` — ตั้งชุดประจำวันในสัปดาห์\n"
             "`/set-dress` — ตั้งชุดวันพิเศษ\n"
-            "`/post-dress` — โพสต์แจ้งเครื่องแต่งกายทันที"
+            "`/post-dress` — โพสต์แจ้งเครื่องแต่งกายทันที\n"
+            "`/check-powerschool` — ตรวจข้อความจากครูใน PowerSchool ทันที"
         )
         embed.add_field(name="รายการ", value=admin_cmds, inline=False)
 
@@ -2251,7 +2488,8 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s) globally")
 
     for loop in (daily_calendar_school, daily_calendar_holiday,
-                 delete_daily_reminder, check_dm_reminders, daily_dress_reminder):
+                 delete_daily_reminder, check_dm_reminders, daily_dress_reminder,
+                 daily_powerschool_check):
         if not loop.is_running():
             loop.start()
 

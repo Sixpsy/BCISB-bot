@@ -30,6 +30,14 @@ DISCORD_TOKEN=
 CHANNEL_ID=              # calendar channel
 RESOURCES_CHANNEL_ID=    # resources channel
 DRESS_CHANNEL_ID=        # dress code channel
+
+# PowerSchool relay (optional — feature is inert if POWERSCHOOL_CHANNEL_ID is unset)
+POWERSCHOOL_CHANNEL_ID=  # private channel for homeroom-teacher messages
+POWERSCHOOL_USER=        # guardian portal username
+POWERSCHOOL_PASS=        # guardian portal password
+POWERSCHOOL_URL=         # optional, defaults to https://bcisb.powerschool.com
+POWERSCHOOL_HUB_URL=     # optional, defaults to https://bcisb.guardian.powerschool.com
+POWERSCHOOL_TEACHER=     # optional, defaults to "Randy" — matched on message author
 ```
 
 No test suite or linter is currently configured.
@@ -64,6 +72,7 @@ Everything lives in two Python files:
 
 - **`bot.py`** — 2,000+ line monolith containing all Discord slash commands, background tasks, event logic, resource processing, and reminder delivery.
 - **`calendar_render.py`** — Renders a calendar as an HTML string, then takes a Playwright screenshot to produce a PNG. Called by `/calendar` and the monthly auto-post task.
+- **`powerschool.py`** — Playwright login to the BCISB PowerSchool guardian portal plus an `explore` CLI for dumping the authenticated portal. See the PowerSchool relay section below.
 
 ### Data files (JSON, all hand-edited or written by the bot at runtime)
 
@@ -76,6 +85,7 @@ Everything lives in two Python files:
 | `reminders.json` | Active personal DM reminders with `remind_at` timestamps |
 | `resources.json` | Index of posted resource embeds |
 | `calendar_state.json` | Tracks posted calendar message IDs for editing/deleting |
+| `powerschool_state.json` | Hashes of already-relayed PowerSchool messages (de-dup) + `last_check` |
 
 ### Background tasks (all times UTC+7)
 
@@ -86,6 +96,7 @@ Everything lives in two Python files:
 | `delete_daily_reminder` | 00:00 | Delete yesterday's events embed from the calendar channel |
 | `daily_dress_reminder` | 06:02 | Post today's + tomorrow's dress code |
 | `check_dm_reminders` | Every 5 min | Poll `reminders.json` and DM users when `remind_at` is due |
+| `daily_powerschool_check` | 18:00 | Poll PowerSchool for new homeroom-teacher messages and relay them to the private channel |
 
 Both `daily_calendar_*` loops share a `state["last_calendar_post"] = "YYYY-MM-DD"`
 idempotency key, and `on_ready` runs a catch-up post if that key is older than
@@ -103,6 +114,122 @@ today's BKK date (covers restarts after a missed window).
 
 When files are uploaded to the resources channel, the bot extracts text from PDFs (PyMuPDF) or images, detects date patterns in the text, and surfaces clickable buttons so admins can add detected dates directly to the calendar.
 
+## PowerSchool relay
+
+Relays the homeroom teacher's messages into a private Discord channel, checked
+daily at 18:00 BKK. `powerschool.py` does the reading; `bot.py` does the
+scheduling, de-duplication and posting. `/check-powerschool` (Admin) runs it
+on demand.
+
+### Where the messages actually are
+
+Not in the classic `/guardian/` portal — that is why they cannot be found
+there. They are in **PowerSchool Messaging**, a Sendbird chat surfaced through
+MyPowerHub. The route, confirmed against the live app on 2026-08-28:
+
+1. Sign in to the SIS portal at `https://bcisb.powerschool.com`.
+2. Go to `https://bcisb.guardian.powerschool.com` (MyPowerHub) — SSO off the
+   same session, no second login.
+3. Click the header `button[aria-label="Messaging"]`. It is a **button, not a
+   link**, which is why it never turns up in a nav-link scan.
+4. Expand the **"Classes" accordion** — it starts `aria-expanded="false"` and
+   the conversations are not in the DOM until it is opened. Missing this step
+   makes the inbox look empty. Two measured gotchas here:
+   - Its accessible name is **`"Classes0 unread messages"`**, not `"Classes"`,
+     so `get_by_role("button", name="Classes", exact=True)` never matches. The
+     unread suffix also disappears once expanded, so anchor on the prefix.
+     `_EXPAND_GROUPS_JS` matches `innerText` in JS instead.
+   - The pane is a lazily-loaded micro-frontend: the accordion appears roughly
+     **8 seconds** after the Messaging click on a cold browser context, so
+     `_open_messaging` polls to a deadline rather than waiting once.
+5. Click a conversation; the message list renders and is readable.
+
+Sendbird's REST API (`api.messenger-inbox.mfe.powerschool.com/api/user/session`
+→ `api-<appid>.sendbird.com/v3/...`) sits behind this and would be sturdier
+than the DOM, but it means handling a third-party session token. The DOM inside
+the already-authenticated Playwright session needs no extra credentials.
+
+### Confirmed selectors (`powerschool.py`)
+
+| What | Selector |
+|---|---|
+| Message list | `.messenger-inbox__conversation__message-list` |
+| One message | `.messenger-inbox__message-content` |
+| Sender name | `.messenger-inbox__message-content__middle__sender-name` |
+| Body | `.messenger-inbox__message-content__middle__body-container` |
+| Timestamp | `…__body-container__created-at` |
+| Date separator | `.messenger-inbox__conversation__date-separator__label` |
+| System message | `.messenger-inbox__admin-message`, `.sendbird-admin-message` |
+| Conversation row | `button.messenger-inbox__messenger-channel-preview__button` |
+
+A third trap, in the conversation list. The row is laid out as:
+
+```
+div.messenger-inbox__messenger-channel-preview
+  div.messenger-channel-preview                             <- the preview
+  button.messenger-inbox__messenger-channel-preview__button  <- SIBLING
+```
+
+The button is a **sibling** of the preview, not its ancestor, so the obvious
+`button:has(.messenger-channel-preview)` matches nothing — measured 0 hits
+against the live DOM. Use the explicit button class.
+
+Two more traps the extraction handles, both verified against the live DOM:
+
+- **Sender names appear only on the first message of a consecutive run** by the
+  same person, so the last seen name is carried forward. Reading each bubble
+  independently leaves later messages with an empty author, and they then fail
+  the teacher filter.
+- **Date separators are relative** ("Today", "Yesterday"). They are normalised
+  to an absolute date before hashing, because otherwise the same message gets a
+  new `message_id()` when the label rolls over and is relayed again every day.
+
+The teacher renders as `Randy Allen Hudson Jr.` (classic portal:
+`Hudson Jr., Randy Allen`, randyhudson@bcisb.ac.th), so the default
+`POWERSCHOOL_TEACHER=Randy` matches. Matching is on the author field only.
+
+### Login success cannot be detected from the URL
+
+Verified with a bogus account: a *rejected* sign-in also ends up at
+`https://bcisb.powerschool.com/guardian/home.html` (the form's own action),
+with the form re-rendered and the text "Invalid Username or Password!".
+`_login()` therefore requires both a `/guardian/` URL *and* the absence of
+`input[name='pw']`. Do not "simplify" this back to a URL check — the failure
+would be invisible, showing up only as `posted 0 new message(s)` every night.
+
+### Other notes
+
+- Only the recently-rendered messages are read; the chat list is virtualised
+  and history is not scrolled back. Fine for a notification relay.
+- First run posts only the newest `PS_FIRST_RUN_LIMIT` (3) messages and marks
+  older ones seen, so enabling the feature does not dump a term's backlog.
+- `powerschool_state.json` **must** exist as a file on the NAS before
+  `docker-compose up`, or Docker creates a directory at the mount point.
+- The PowerSchool REST API is enabled on the instance but needs a plugin
+  `client_id`/`secret` from a school admin. If BCISB will issue those, it beats
+  scraping.
+- Single student assumed. MyPowerHub has a student switcher; a second child
+  would need iterating it.
+- `bot.py` calls `client.run(TOKEN)` at module level with no
+  `if __name__ == "__main__"` guard, so it **cannot be imported** for testing —
+  importing it connects a second live bot and starts every daily loop. Test
+  `powerschool.py` standalone, and the Discord side via `/check-powerschool`.
+- Verified end-to-end on 2026-08-28: 2 messages fetched, authors correct,
+  timestamps `2026-08-24T17:00:00+07:00` / `2026-08-28T12:44:00+07:00`,
+  message ids identical across two consecutive runs (de-dup holds).
+- `python powerschool.py explore` still exists as a discovery tool: it logs in
+  and dumps the classic portal's nav and page text (desktop + mobile) to
+  `./ps_dump/`.
+- **`posted_at` is hashed into `message_id()`**, so its stored ISO form must
+  never be "prettified" — changing it changes every id and re-relays the whole
+  backlog. The embed footer is formatted for display only, by
+  `_fmt_posted_at()` in `bot.py`, which reuses `fmt_thai_date` →
+  `PowerSchool · วันศุกร์ที่ 28 สิงหาคม 2569 12:44 น.`. It checks for a `T`
+  before parsing because `datetime.fromisoformat("2026-08-24")` returns
+  midnight, which would show a `00:00 น.` the portal never reported;
+  `_compose_posted_at` legitimately returns a bare date when it cannot parse
+  the time label.
+
 ## Test channel
 
 A private channel (ID `1503578584961515691`, not visible to parents) exists for testing bot output without affecting live channels. Two admin-only commands post to it:
@@ -119,6 +246,26 @@ None of these commands touch or purge the real channels.
 
 - **`on_ready` fires on every Discord reconnect**, not just startup. All task loops are guarded with `if not loop.is_running(): loop.start()` to prevent duplicate loop instances from launching on reconnect.
 - **`post_dress_code` race condition** — concurrent calls (e.g. from multiple loop instances) would each post a message then purge the others, leaving the channel empty. Fixed with `_dress_post_lock = asyncio.Lock()` so calls queue instead of racing.
+- **"Today" highlighted on the wrong day** — the container has no `TZ` set, so
+  `date.today()` returns the **UTC** date. The 06:00 BKK auto-post runs at 23:00
+  UTC the day before, so `calendar_render._month_cells` boxed *yesterday* while
+  the log correctly reported the message as edited. Every "today" now comes from
+  `datetime.now(BANGKOK_TZ).date()` (`calendar_render.BANGKOK_TZ`, and the three
+  former `date.today()` calls in `bot.py`). `TZ: "Asia/Bangkok"` was added to
+  `docker-compose.yml` as defence-in-depth only — the code must not rely on it,
+  since a bare `python bot.py` run has no compose file.
+- **The `@everyone` events embed was never deleted** — `delete_daily_reminder`
+  fires at 17:00 UTC, which is already **00:00 of the next** BKK day, so the
+  stored embed's date never equalled `today_str`. The guard took its
+  pop-and-return branch every night: state cleared, message left in the channel,
+  no log line either way. The comparison is now inverted (a *stale* date is what
+  triggers the delete) and the keep branch leaves the state key intact. This was
+  masked until `post_two_month_calendar` switched to editing in place — the old
+  unconditional channel purge used to remove the orphan as a side effect.
+- **Orphaned embeds are now self-healed** — `post_daily_calendar` overwrote
+  `state["daily_reminder_msg"]` without deleting the previous message, so any
+  missed midnight run leaked an embed permanently. It now deletes a stored embed
+  carrying a different date before recording the new one.
 
 ## Key conventions
 

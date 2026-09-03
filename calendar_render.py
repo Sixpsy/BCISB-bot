@@ -1,5 +1,5 @@
 import calendar, json, os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from playwright.async_api import async_playwright
 
 # ---------------------------------------------------------------------------
@@ -17,6 +17,11 @@ def _load_categories():
     return colors, labels
 
 CAT_COLORS, CAT_LABELS = _load_categories()
+
+# The bot runs in a UTC container, so `date.today()` would return the previous
+# day between 00:00 and 07:00 Bangkok time — i.e. exactly when the 06:00 BKK
+# auto-post renders. Always derive "today" in Bangkok time.
+BANGKOK_TZ = timezone(timedelta(hours=7))
 # Fallback color used when an event's category key isn't found in CAT_COLORS.
 # (Avoids a KeyError crash when categories.json is edited and old events still exist.)
 _CAT_FALLBACK = next(iter(CAT_COLORS.values())) if CAT_COLORS else {"bg": "#E0E0E0", "text": "#555555"}
@@ -95,7 +100,7 @@ def _month_cells(events, year, month):
     """Generate grid cells for a single month (weekday headers + day cells in one grid)."""
     event_map = build_event_map(events, year, month)
     cal = calendar.Calendar(firstweekday=6).monthdayscalendar(year, month)
-    today = date.today()
+    today = datetime.now(BANGKOK_TZ).date()
 
     cells = WEEKDAY_CELLS
 

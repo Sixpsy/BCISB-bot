@@ -8,6 +8,10 @@ services:
     environment:
       # Flush print() output immediately so `docker logs` shows real-time activity
       PYTHONUNBUFFERED: "1"
+      # Defence-in-depth only. All date logic derives "today" from BANGKOK_TZ
+      # explicitly and must not depend on this — CLAUDE.md also documents a
+      # bare `python bot.py` run with no compose file.
+      TZ: "Asia/Bangkok"
     volumes:
       # Mutable data files — mounted from the NAS folder so they survive rebuilds
       - ./events.json:/app/events.json
@@ -16,3 +20,4 @@ services:
       - ./dresscode.json:/app/dresscode.json
       - ./calendar_state.json:/app/calendar_state.json
       - ./recurring.json:/app/recurring.json
+      - ./powerschool_state.json:/app/powerschool_state.json
