@@ -21,3 +21,7 @@ services:
       - ./calendar_state.json:/app/calendar_state.json
       - ./recurring.json:/app/recurring.json
       - ./powerschool_state.json:/app/powerschool_state.json
+      # Canva links found in relayed messages are queued here; canva_worker.py
+      # on the Mac mini drains it. The bot never renders Canva itself — a
+      # capture peaks near 1 GB and this box has ~1.7 GB free.
+      - ./canva_queue.json:/app/canva_queue.json

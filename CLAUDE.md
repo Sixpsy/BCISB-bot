@@ -66,6 +66,14 @@ The JSON data files (`events.json`, `dresscode.json`, etc.) are mounted as Docke
 
 SSH key is at `~/.ssh/id_ed25519_nas`. The NAS `sshd_config` has `PubkeyAuthentication yes` and `AuthorizedKeysFile /etc/ssh/authorized_keys/%u` (Synology's home dir is world-writable so the default `~/.ssh/authorized_keys` location is rejected by SSH).
 
+**`%u` expands to `Sixpsy`, with a capital S.** You log in as `sixpsy`, but the
+account's canonical name is `Sixpsy` (`whoami` confirms it, and files under
+`/volume1` are owned by `Sixpsy`). Both `/etc/ssh/authorized_keys/Sixpsy` and
+`…/sixpsy` exist; **only the capital one is ever read**. A key appended to the
+lowercase file is silently ignored — the handshake shows the key being offered
+and rejected with no hint as to why. Appending needs `sudo`, which is not
+passwordless; only the two `/usr/local/bin/` wrapper scripts are.
+
 ## Architecture
 
 Everything lives in two Python files:
@@ -73,6 +81,8 @@ Everything lives in two Python files:
 - **`bot.py`** — 2,000+ line monolith containing all Discord slash commands, background tasks, event logic, resource processing, and reminder delivery.
 - **`calendar_render.py`** — Renders a calendar as an HTML string, then takes a Playwright screenshot to produce a PNG. Called by `/calendar` and the monthly auto-post task.
 - **`powerschool.py`** — Playwright login to the BCISB PowerSchool guardian portal plus an `explore` CLI for dumping the authenticated portal. See the PowerSchool relay section below.
+- **`canva_fetch.py`** — Captures a public Canva view link page-by-page (`python canva_fetch.py <url> <outdir>`). Imported by `canva_worker.py`, **not** by `bot.py`.
+- **`canva_worker.py`** — Runs on the **Mac mini**, not the NAS. Drains the bot's Canva queue over SSH, renders each design, and writes the pages into Synology Photos. See the Canva capture section below.
 
 ### Data files (JSON, all hand-edited or written by the bot at runtime)
 
@@ -85,7 +95,8 @@ Everything lives in two Python files:
 | `reminders.json` | Active personal DM reminders with `remind_at` timestamps |
 | `resources.json` | Index of posted resource embeds |
 | `calendar_state.json` | Tracks posted calendar message IDs for editing/deleting |
-| `powerschool_state.json` | Hashes of already-relayed PowerSchool messages (de-dup) + `last_check` |
+| `powerschool_state.json` | Hashes of already-relayed PowerSchool messages (de-dup) + `last_check` + `canva_seen` (Canva URLs already queued) |
+| `canva_queue.json` | Canva links awaiting capture by `canva_worker.py` on the Mac mini |
 
 ### Background tasks (all times UTC+7)
 
@@ -96,7 +107,7 @@ Everything lives in two Python files:
 | `delete_daily_reminder` | 00:00 | Delete yesterday's events embed from the calendar channel |
 | `daily_dress_reminder` | 06:02 | Post today's + tomorrow's dress code |
 | `check_dm_reminders` | Every 5 min | Poll `reminders.json` and DM users when `remind_at` is due |
-| `daily_powerschool_check` | 18:00 | Poll PowerSchool for new homeroom-teacher messages and relay them to the private channel |
+| `daily_powerschool_check` | 07:30, 18:00, 21:00 | Poll PowerSchool for new homeroom-teacher messages, relay them to the private channel, and queue any linked Canva designs for capture |
 
 Both `daily_calendar_*` loops share a `state["last_calendar_post"] = "YYYY-MM-DD"`
 idempotency key, and `on_ready` runs a catch-up post if that key is older than
@@ -229,6 +240,103 @@ would be invisible, showing up only as `posted 0 new message(s)` every night.
   midnight, which would show a `00:00 น.` the portal never reported;
   `_compose_posted_at` legitimately returns a bare date when it cannot parse
   the time label.
+
+## Canva capture (`canva_fetch.py`)
+
+The teacher's messages carry raw Canva links (which is why `_subject_from_body`
+has to skip naked URLs when deriving a title). Every page of each linked design
+is captured and written to Synology Photos as one dated folder per newsletter:
+
+```
+/volume1/photo/BCISB Newsletters/2026-08-24 Weekly Newsletter/page1.jpg …
+```
+
+### Why the work is split across two machines
+
+`bot.py` finds Canva links in relayed messages and appends them to
+`canva_queue.json`. It **never renders Canva itself**: a capture peaks near
+1 GB of Chromium and the Synology has ~1.7 GB free, so adding that to the box
+running the calendar and dress-code posts risks the host OOM-killer reaping the
+whole container. `canva_worker.py` on the Mac mini drains the queue:
+
+```bash
+python3 canva_worker.py            # drain the queue
+python3 canva_worker.py --dry-run  # show what would be captured
+python3 canva_worker.py --once URL --posted-at 2026-08-24   # one-off backfill
+```
+
+A URL is marked seen in `canva_seen` when **queued**, so it is never queued
+twice; a failed capture stays in the queue and the next run retries it. The
+worker re-reads the queue before removing finished entries, so a link the bot
+adds mid-render is not lost. Files reach the NAS through `ssh 'cat > path'` —
+this NAS rejects scp and rsync.
+
+Facts measured against the live viewer on 2026-09-05:
+
+- **There is no API and no download.** Canva's Connect API is OAuth-scoped to
+  designs the authenticated account owns, so a teacher's share link is
+  unreachable. The `More` menu on a public view link offers no Download item.
+  Screenshot capture is the only route.
+- **The `og:image` shortcut is dead.** `…/screen` returns **Cloudflare 403 to
+  every plain HTTP client** — browser UA, Discordbot, Twitterbot,
+  facebookexternalhit all included. Only a real browser session gets through,
+  so don't "optimise" this into a `requests.get`.
+- **Anchor on `aria-label`, never class names.** Classes are hashed
+  (`m_U7nQ`, `_8jGYJw`) and change on every Canva deploy. The stable handles are
+  `[aria-label="Next page"]` and `[aria-label="Go to page"]`, the latter's text
+  reading `1 / 3` — that is where the page count comes from.
+- **Don't use "Hide controls".** It removes the nav buttons from the DOM, so
+  paging then silently captures page 1 N times. Instead the viewport is much
+  *wider* than the page, which puts the chrome outside the page's box; the clip
+  excludes it while `Next page` still works.
+- **The page is located by geometry**, skipping only boxes that fill *both*
+  axes (the app root). Guarding on width alone breaks landscape designs, which
+  fit by width. Only A4 portrait has been tested; the code logs loudly rather
+  than shipping a silent chrome-baked capture.
+- **Resolution is the quality knob, not JPEG quality.** Canva serves photo
+  resolution proportional to *device* pixels (CSS size × DPR), so rendering
+  bigger fetches genuinely larger sources. Measuring source-px per captured-px
+  across the page's photos, the median is 1.07 / 1.00 / 0.97 at captures of
+  3394×4800 / 4526×6400 / 5656×8000 — past ~4500×6400 it is pure upscaling.
+  Hence the `max` preset. PNG is pointless here: it produced a 73 MB PDF where
+  JPEG q95 is visually identical at 14 MB.
+- **Budget ~1 GB RAM per capture.** Measured peak RSS of the chromium tree was
+  ~911 MB (`max`) and ~1036 MB (`high`) — the presets change output size, *not*
+  memory, and are not even ordered the way you would expect. Do not "optimise"
+  this back onto the NAS by dropping to a smaller preset; it would not help.
+- `--disable-dev-shm-usage` is required: Docker's default 64 MB `/dev/shm`
+  cannot hold a 4500×6400 raster and the tab dies without a useful error.
+- **Wait for images to stop upgrading, not a fixed delay.** Canva paints a tiny
+  blurred placeholder and swaps in the full photo a beat later, so a fixed
+  `PAGE_MS` sleep can capture the placeholder — one photo on a page came out
+  unrecognisably blurred exactly this way. `_wait_for_images` polls until every
+  visible image reports `complete` and the total decoded pixel count stops
+  growing, and warns when an image is still under 0.35× its displayed size.
+
+### Dating for Synology Photos
+
+A Playwright screenshot carries no EXIF, so Synology Photos would file every
+page under its upload date. `canva_worker.stamp_date` writes the newsletter's
+own date into `DateTimeOriginal`, and the file's mtime is set to match as a
+fallback.
+
+**Use piexif, not Pillow.** Re-saving through Pillow — even with
+`quality="keep", subsampling="keep"` — re-encodes: the pixels came back
+measurably different and the file grew 3.5%. piexif rewrites only the APP1
+segment, verified byte-identical for +1 KB. Pillow's
+`getexif().get_ifd(0x8769)` also silently fails to persist `DateTimeOriginal`,
+which is the tag Synology actually reads — `DateTime` alone is not enough.
+
+Overwriting a file does **not** reliably re-index: after replacing the August
+pages, DSM kept thumbnails from the previous version. Forcing it needs
+`rm -rf */@eaDir` plus a `touch` to now so the indexer sees a change event;
+EXIF still drives the photo date, so the timeline is unaffected and the mtime
+can be set back afterwards.
+
+Discord output is unchanged — a captured newsletter is 14–19 MB, well over
+Discord's 10 MB limit, so the pages only ever go to Synology Photos.
+DSM indexes them on write: `@eaDir` thumbnails appeared immediately for files
+delivered over SSH by an external process, so no manual re-index is needed.
 
 ## Test channel
 

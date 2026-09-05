@@ -4,3 +4,6 @@ python-dotenv==1.0.1
 PyMuPDF==1.24.5
 Pillow==10.3.0
 aiohttp==3.9.5
+# canva_worker.py only (runs on the Mac mini, not in the bot container):
+# lossless EXIF dating — Pillow re-encodes even with quality="keep".
+piexif==1.1.3

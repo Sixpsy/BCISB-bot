@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Drains the bot's Canva queue every 30 minutes on the Mac mini.
+
+  Install:
+    cp com.bcisb.canva-worker.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.bcisb.canva-worker.plist
+
+  A run with an empty queue is one SSH round trip and exits 0, so a short
+  interval is cheap. Polling rather than matching the bot's 07:30/18:00/21:00
+  check times means a transient network failure self-heals within half an hour
+  instead of waiting for the next check.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bcisb.canva-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/golf/bcisb-canva/.venv/bin/python</string>
+        <string>/Users/golf/bcisb-canva/canva_worker.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/golf/bcisb-canva</string>
+
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/golf/bcisb-canva/worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/golf/bcisb-canva/worker.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

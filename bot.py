@@ -130,6 +130,19 @@ PS_SEEN_CAP = 500
 # doesn't dump a term's worth of messages into the channel at once.
 PS_FIRST_RUN_LIMIT = 3
 
+# Canva links found in relayed messages are QUEUED here, not captured. A
+# capture peaks near 1 GB of Chromium and the Synology has ~1.7 GB free, so the
+# work is done by canva_worker.py on the Mac mini, which drains this queue and
+# writes the pages straight into the Synology Photos share. Entries persist
+# until the worker succeeds, so a sleeping Mac mini just delays them.
+CANVA_QUEUE_FILE = BASE_DIR / "canva_queue.json"
+# Bound the capture list the same way PS_SEEN_CAP bounds the message list.
+CANVA_SEEN_CAP = 200
+_CANVA_RE = re.compile(
+    r"https?://(?:www\.)?(?:canva\.link/[\w-]+|canva\.com/design/[\w-]+/[\w-]+/\w+)",
+    re.I,
+)
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True          # Required for on_member_join welcome DM
@@ -1222,7 +1235,78 @@ def build_powerschool_embed(msg: dict) -> discord.Embed:
     return embed
 
 
+def _canva_links(body: str) -> list:
+    """Canva URLs appearing as raw text in a message body.
+
+    The teacher pastes bare URLs, which is why `_subject_from_body` has to skip
+    them when deriving a title — so innerText already carries them and no href
+    scraping is needed. Trailing punctuation is trimmed: "…/view." would
+    otherwise 404."""
+    out, seen = [], set()
+    for m in _CANVA_RE.finditer(body or ""):
+        u = m.group(0).rstrip(".,);:'\"")
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def load_canva_queue() -> list:
+    if CANVA_QUEUE_FILE.exists():
+        with open(CANVA_QUEUE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_canva_queue(q: list):
+    save_json_atomic(CANVA_QUEUE_FILE, q)
+
+
+def queue_canva_links(msgs: list) -> int:
+    """Queue Canva links from newly relayed messages for the capture worker.
+
+    The bot deliberately does no capturing — see CANVA_QUEUE_FILE. Marking a
+    URL seen at queue time (not at capture time) keeps it out of the queue
+    twice; the worker retries a failed capture from the queue itself."""
+    st   = load_ps_state()
+    done = list(st.get("canva_seen", []))
+    done_set = set(done)
+
+    queue  = load_canva_queue()
+    queued = {e.get("url") for e in queue}
+    added  = 0
+
+    for m in msgs:
+        for url in _canva_links(m.get("body", "")):
+            if url in done_set or url in queued:
+                continue
+            queue.append({
+                "url":       url,
+                "posted_at": m.get("posted_at", ""),
+                "subject":   m.get("subject", ""),
+                "queued_at": datetime.now(BANGKOK_TZ).isoformat(timespec="seconds"),
+            })
+            queued.add(url)
+            done.append(url)
+            done_set.add(url)
+            added += 1
+
+    if added:
+        save_canva_queue(queue)
+        st = load_ps_state()
+        st["canva_seen"] = done[-CANVA_SEEN_CAP:]
+        save_ps_state(st)
+        print(f"[canva] Queued {added} link(s) for capture — {len(queue)} pending")
+    return added
+
+
 async def check_powerschool() -> tuple[int, str]:
+    """Poll PowerSchool and post unseen teacher messages. Serialised."""
+    async with _ps_check_lock:
+        return await _check_powerschool_impl()
+
+
+async def _check_powerschool_impl() -> tuple[int, str]:
     """Poll PowerSchool and post unseen teacher messages.
 
     Returns (number_posted, error_message). An empty error string means the
@@ -1262,6 +1346,7 @@ async def check_powerschool() -> tuple[int, str]:
               f"as seen without posting")
 
     posted = 0
+    posted_msgs = []
     for msg in fresh:
         try:
             await channel.send(embed=build_powerschool_embed(msg))
@@ -1270,6 +1355,7 @@ async def check_powerschool() -> tuple[int, str]:
             save_ps_state({**state, "seen": seen[-PS_SEEN_CAP:]})
             return posted, f"ส่งข้อความไม่สำเร็จ: {e}"
         seen.append(powerschool.message_id(msg))
+        posted_msgs.append(msg)
         posted += 1
 
     if messages:
@@ -1277,12 +1363,31 @@ async def check_powerschool() -> tuple[int, str]:
     state["seen"]       = seen[-PS_SEEN_CAP:]
     state["last_check"] = datetime.now(BANGKOK_TZ).isoformat(timespec="seconds")
     save_ps_state(state)
+
+    # After the message state is durable, so a queue-write failure can never
+    # cause a message to be relayed twice.
+    if posted_msgs:
+        try:
+            queue_canva_links(posted_msgs)
+        except Exception as e:
+            print(f"[canva] Could not queue links: {type(e).__name__}: {e}")
+
     return posted, ""
 
 
-@tasks.loop(time=dtime(hour=11, minute=0, tzinfo=timezone.utc))
+# 07:30 / 18:00 / 21:00 BKK. tasks.loop accepts a list of times and fires at
+# each one; de-duplication is by message hash, so extra checks cost a portal
+# visit and post nothing when there is nothing new.
+PS_CHECK_TIMES = [
+    dtime(hour=0,  minute=30, tzinfo=timezone.utc),   # 07:30 BKK
+    dtime(hour=11, minute=0,  tzinfo=timezone.utc),   # 18:00 BKK
+    dtime(hour=14, minute=0,  tzinfo=timezone.utc),   # 21:00 BKK
+]
+
+
+@tasks.loop(time=PS_CHECK_TIMES)
 async def daily_powerschool_check():
-    """18:00 BKK — relay any new messages from the homeroom teacher.
+    """07:30, 18:00 and 21:00 BKK — relay new messages from the homeroom teacher.
 
     Every failure is swallowed and logged: an unhandled exception inside a
     tasks.loop kills the loop for the life of the process."""
