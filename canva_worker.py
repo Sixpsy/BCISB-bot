@@ -156,7 +156,17 @@ async def capture_and_file(url: str, posted_at: str, preset: str) -> str:
             remote = f"{dest}/{sh.name}"
             nas_write(remote, sh.read_bytes())
             nas_touch(remote, day)
-        return f"{dest}  ({len(shots)} page(s), dated {day})"
+
+        # canva_fetch.to_pdf embeds each page's JPEG at full captured
+        # resolution (no re-encode), so this costs no detail versus the pages
+        # themselves — see the A4_LONG_PT comment in canva_fetch.py.
+        pdf_path = tmp / "design.pdf"
+        canva_fetch.to_pdf(shots, pdf_path)
+        remote_pdf = f"{dest}/design.pdf"
+        nas_write(remote_pdf, pdf_path.read_bytes())
+        nas_touch(remote_pdf, day)
+
+        return f"{dest}  ({len(shots)} page(s) + PDF, dated {day})"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

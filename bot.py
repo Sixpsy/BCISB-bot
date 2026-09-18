@@ -16,6 +16,7 @@ from calendar_render import (
     load_events, TH_MONTHS, next_month,
 )
 import powerschool
+from message_render import render_message_image
 
 # Optional deps — bot works without them but OCR/PDF won't extract text
 try:
@@ -129,6 +130,10 @@ PS_SEEN_CAP = 500
 # only the newest few and silently mark the rest seen, so enabling the feature
 # doesn't dump a term's worth of messages into the channel at once.
 PS_FIRST_RUN_LIMIT = 3
+# Serialises check_powerschool() the same way _dress_post_lock serialises
+# post_dress_code() — concurrent callers (the loop firing at the same moment
+# as a manual /check-powerschool) must queue, not race the portal/state file.
+_ps_check_lock = asyncio.Lock()
 
 # Canva links found in relayed messages are QUEUED here, not captured. A
 # capture peaks near 1 GB of Chromium and the Synology has ~1.7 GB free, so the
@@ -1187,7 +1192,7 @@ async def daily_dress_reminder():
 
 # =============================================
 #  PowerSchool relay: homeroom-teacher messages -> private channel
-#  Checked daily at 18:00 UTC+7 (11:00 UTC).
+#  Checked hourly at :15 past the hour.
 # =============================================
 def _fmt_posted_at(raw: str) -> str:
     """Human-readable Thai label for a PowerSchool timestamp.
@@ -1214,25 +1219,54 @@ def _fmt_posted_at(raw: str) -> str:
     return f"{fmt_thai_date(dt.date())} {dt:%H:%M} น."
 
 
-def build_powerschool_embed(msg: dict) -> discord.Embed:
-    """One embed per teacher message. Body is relayed verbatim."""
-    body = (msg.get("body") or "").strip()
-    # Discord caps an embed description at 4096 characters.
-    if len(body) > 4000:
-        body = body[:4000] + "\n\n… (ตัดข้อความ — ดูฉบับเต็มใน PowerSchool)"
+def _split_body(body: str, limit: int) -> list:
+    """Break body into <=limit-char pieces, preferring a line break as the cut
+    point so a continuation embed doesn't open mid-sentence."""
+    if len(body) <= limit:
+        return [body]
+    chunks = []
+    remaining = body
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
-    embed = discord.Embed(
-        title=(msg.get("subject") or "ข้อความจากครู")[:256],
-        description=body or "_(ไม่มีเนื้อหา)_",
-        color=0x0F6CBD,          # PowerSchool blue
-        url=msg.get("url") or None,
-    )
+
+def build_powerschool_embeds(msg: dict) -> list:
+    """One or more embeds for a single teacher message. The body is relayed
+    verbatim, split across embeds rather than truncated when it's long.
+
+    Discord caps a single embed's description at 4096 chars and an embed's
+    total content at 6000 — each returned embed is meant to be sent as its
+    own message (not packed together), so a 4000-char budget per chunk stays
+    comfortably under both."""
+    body = (msg.get("body") or "").strip() or "_(ไม่มีเนื้อหา)_"
+    chunks = _split_body(body, 4000)
+
     author = (msg.get("author") or "").strip()
-    if author:
-        embed.set_author(name=author[:256])
     posted_at = _fmt_posted_at(msg.get("posted_at"))
-    embed.set_footer(text=f"PowerSchool · {posted_at}" if posted_at else "PowerSchool")
-    return embed
+    footer = f"PowerSchool · {posted_at}" if posted_at else "PowerSchool"
+
+    embeds = []
+    for i, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            title=(msg.get("subject") or "ข้อความจากครู")[:256] if i == 0 else None,
+            description=chunk,
+            color=0x0F6CBD,          # PowerSchool blue
+            url=(msg.get("url") or None) if i == 0 else None,
+        )
+        if i == 0 and author:
+            embed.set_author(name=author[:256])
+        embed.set_footer(
+            text=footer if len(chunks) == 1 else f"{footer} · ต่อ {i + 1}/{len(chunks)}"
+        )
+        embeds.append(embed)
+    return embeds
 
 
 def _canva_links(body: str) -> list:
@@ -1349,7 +1383,36 @@ async def _check_powerschool_impl() -> tuple[int, str]:
     posted_msgs = []
     for msg in fresh:
         try:
-            await channel.send(embed=build_powerschool_embed(msg))
+            embeds = build_powerschool_embeds(msg)
+
+            # A rendering hiccup shouldn't stall the whole relay — fall back
+            # to text-only for this message rather than retrying it forever
+            # on every future check. Only the render itself is guarded here;
+            # the sends below stay outside so a send failure (as opposed to a
+            # render failure) still hits the outer except and gets retried,
+            # instead of being swallowed with a stale embeds[0].set_image().
+            image_png = None
+            try:
+                image_png = await render_message_image(
+                    subject=msg.get("subject") or "ข้อความจากครู",
+                    body=(msg.get("body") or "").strip(),
+                    author=(msg.get("author") or "").strip(),
+                    posted_at=_fmt_posted_at(msg.get("posted_at")),
+                )
+            except Exception as render_err:
+                print(f"[powerschool] Image render failed, posting text only: {render_err}")
+
+            if image_png is not None:
+                embeds[0].set_image(url="attachment://powerschool_msg.png")
+                await channel.send(
+                    embed=embeds[0],
+                    file=discord.File(io.BytesIO(image_png), filename="powerschool_msg.png"),
+                )
+            else:
+                await channel.send(embed=embeds[0])
+
+            for embed in embeds[1:]:
+                await channel.send(embed=embed)
         except Exception as e:
             # Stop on send failure rather than marking unposted messages seen.
             save_ps_state({**state, "seen": seen[-PS_SEEN_CAP:]})
@@ -1375,19 +1438,20 @@ async def _check_powerschool_impl() -> tuple[int, str]:
     return posted, ""
 
 
-# 07:30 / 18:00 / 21:00 BKK. tasks.loop accepts a list of times and fires at
-# each one; de-duplication is by message hash, so extra checks cost a portal
-# visit and post nothing when there is nothing new.
-PS_CHECK_TIMES = [
-    dtime(hour=0,  minute=30, tzinfo=timezone.utc),   # 07:30 BKK
-    dtime(hour=11, minute=0,  tzinfo=timezone.utc),   # 18:00 BKK
-    dtime(hour=14, minute=0,  tzinfo=timezone.utc),   # 21:00 BKK
-]
+# tasks.loop accepts a list of times and fires at each one; de-duplication is
+# by message hash, so extra checks cost a portal visit and post nothing when
+# there is nothing new.
+# :15 past every hour, UTC (== :15 past every hour BKK — hourly is timezone-
+# agnostic). Chosen to land clear of the other scheduled tasks: 00:00, 06:00,
+# 06:02 and 09:00 BKK (17:00, 23:00, 23:02, 02:00 UTC). check_dm_reminders
+# (every 5 min) still coincides once an hour, but that's a lightweight JSON
+# poll with no Playwright involved, so the overlap is harmless.
+PS_CHECK_TIMES = [dtime(hour=h, minute=15, tzinfo=timezone.utc) for h in range(24)]
 
 
 @tasks.loop(time=PS_CHECK_TIMES)
 async def daily_powerschool_check():
-    """07:30, 18:00 and 21:00 BKK — relay new messages from the homeroom teacher.
+    """Hourly at :15 — relay new messages from the homeroom teacher.
 
     Every failure is swallowed and logged: an unhandled exception inside a
     tasks.loop kills the loop for the life of the process."""

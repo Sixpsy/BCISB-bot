@@ -107,7 +107,7 @@ Everything lives in two Python files:
 | `delete_daily_reminder` | 00:00 | Delete yesterday's events embed from the calendar channel |
 | `daily_dress_reminder` | 06:02 | Post today's + tomorrow's dress code |
 | `check_dm_reminders` | Every 5 min | Poll `reminders.json` and DM users when `remind_at` is due |
-| `daily_powerschool_check` | 07:30, 18:00, 21:00 | Poll PowerSchool for new homeroom-teacher messages, relay them to the private channel, and queue any linked Canva designs for capture |
+| `daily_powerschool_check` | Hourly, :15 past | Poll PowerSchool for new homeroom-teacher messages, relay them to the private channel, and queue any linked Canva designs for capture |
 
 Both `daily_calendar_*` loops share a `state["last_calendar_post"] = "YYYY-MM-DD"`
 idempotency key, and `on_ready` runs a catch-up post if that key is older than
@@ -245,10 +245,14 @@ would be invisible, showing up only as `posted 0 new message(s)` every night.
 
 The teacher's messages carry raw Canva links (which is why `_subject_from_body`
 has to skip naked URLs when deriving a title). Every page of each linked design
-is captured and written to Synology Photos as one dated folder per newsletter:
+is captured and written to Synology Photos as one dated folder per newsletter,
+alongside a PDF (`canva_fetch.to_pdf`) built from those same page images —
+embedded at full captured resolution, no re-encode, so it costs no detail
+relative to the pages themselves:
 
 ```
 /volume1/photo/BCISB Newsletters/2026-08-24 Weekly Newsletter/page1.jpg …
+/volume1/photo/BCISB Newsletters/2026-08-24 Weekly Newsletter/design.pdf
 ```
 
 ### Why the work is split across two machines
